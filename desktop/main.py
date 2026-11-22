@@ -12,6 +12,7 @@ import os
 import shutil
 import socket
 import subprocess
+import faulthandler
 import sys
 import tarfile
 import threading
@@ -472,6 +473,10 @@ def main() -> None:
     sys.stdout = log  # type: ignore[assignment]
     sys.stderr = log  # type: ignore[assignment]
     print(f"\n=== {APP_NAME} start {time.strftime('%Y-%m-%d %H:%M:%S')} ===", flush=True)
+    try:
+        faulthandler.enable(open(log_path, "a", buffering=1, encoding="utf-8"))
+    except Exception:
+        pass
     print(f"data: {data_dir}", flush=True)
     print(f"platform: {sys.platform}", flush=True)
     print(f"frozen: {getattr(sys, 'frozen', False)}", flush=True)

@@ -209,7 +209,7 @@ def _measure_loudness(source: Path, start: float, duration: float,
     try:
         proc = subprocess.run(
             [ffmpeg(), "-hide_banner", "-nostats", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}",
-             "-i", str(source), "-map", f"0:a:{max(0, int(audio_track))}", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
+             "-i", str(source), "-map", f"0:a:{max(0, int(audio_track))}?", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
              "-f", "null", "-"],
             capture_output=True, text=True, errors="replace",
             timeout=max(30.0, duration * 2.5),
@@ -330,7 +330,7 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
             audio_filter = "loudnorm=I=-14:TP=-1.5:LRA=11"
         fade_out = max(0.0, duration - 0.06)
         audio_filter += f",afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out:.3f}:d=0.05"
-        cmd += ["-map", f"0:a:{max(0, int(audio_track))}", "-af", audio_filter,
+        cmd += ["-map", f"0:a:{max(0, int(audio_track))}?", "-af", audio_filter,
                 "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
     else:
         cmd += ["-an"]
@@ -360,7 +360,7 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                 audio_filter = "loudnorm=I=-14:TP=-1.5:LRA=11"
             fade_out = max(0.0, duration - 0.06)
             audio_filter += f",afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out:.3f}:d=0.05"
-            built += ["-map", f"0:a:{max(0, int(audio_track))}", "-af", audio_filter,
+            built += ["-map", f"0:a:{max(0, int(audio_track))}?", "-af", audio_filter,
                       "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
         else:
             built += ["-an"]

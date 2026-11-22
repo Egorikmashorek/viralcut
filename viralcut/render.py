@@ -61,30 +61,8 @@ def _auto_chain(w: int, h: int, crop_path: Dict[str, Any], sharpen: bool = False
 _HW_CACHE: Dict[str, Any] = {}
 
 
-def hw_encoder() -> Optional[str]:
-    """Аппаратный энкодер для быстрого рендера: videotoolbox / nvenc / qsv.
-
-    Проверяем один раз и только если ffmpeg его действительно знает; при ошибке
-    рендер сам откатится на libx264, поэтому «auto» безопасен.
-    """
-    if "value" in _HW_CACHE:
-        return _HW_CACHE["value"]
-    if os.environ.get("VIRALCUT_HW_ENCODE", "auto").strip().lower() in ("0", "false", "no", "off"):
-        _HW_CACHE["value"] = None
-        return None
-    preferred = {"darwin": ["h264_videotoolbox"], "win32": ["h264_nvenc", "h264_qsv"],
-                 "linux": ["h264_nvenc", "h264_qsv", "h264_vaapi"]}.get(sys.platform, [])
-    try:
-        proc = run([ffmpeg(), "-hide_banner", "-encoders"])
-        text = (proc.stdout or "") + (proc.stderr or "")
-    except Exception:
-        text = ""
-    found = next((name for name in preferred if name in text), None)
-    _HW_CACHE["value"] = found
-    return found
-
-
 def _hw_args(encoder: str, crf: int) -> List[str]:
+    """Аргументы аппаратного энкодера (у каждого свои понятия качества)."""
     if encoder == "h264_videotoolbox":
         return ["-c:v", encoder, "-b:v", "9M", "-maxrate", "14M", "-bufsize", "14M",
                 "-profile:v", "high", "-pix_fmt", "yuv420p"]
@@ -95,6 +73,107 @@ def _hw_args(encoder: str, crf: int) -> List[str]:
         return ["-c:v", encoder, "-global_quality", str(crf), "-pix_fmt", "nv12"]
     return ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
             "-profile:v", "high", "-pix_fmt", "yuv420p"]
+
+
+def _hw_works(encoder: str) -> bool:
+    """Реально ли работает железо, а не только «энкодер есть в сборке ffmpeg».
+
+    `-encoders` показывает скомпилированные кодеки: nvenc есть в списке даже на
+    ноутбуке без NVIDIA, videotoolbox — не на каждом чипе. Поэтому пробуем
+    закодировать несколько кадров и только потом доверяем энкодеру.
+    """
+    key = f"works:{encoder}"
+    if key in _HW_CACHE:
+        return bool(_HW_CACHE[key])
+    cmd = [ffmpeg(), "-hide_banner", "-v", "error", "-f", "lavfi",
+           "-i", "color=c=black:s=1080x1920:r=30:d=0.4", "-frames:v", "8",
+           *_hw_args(encoder, 21), "-f", "null", "-"]
+    ok = False
+    try:
+        proc = run(cmd, timeout=15)
+        ok = proc.returncode == 0
+    except Exception:  # noqa: BLE001 — таймаут/падение трактуем как «не работает»
+        ok = False
+    _HW_CACHE[key] = ok
+    return ok
+
+
+def hw_encoder() -> Optional[str]:
+    """Аппаратный энкодер для быстрого рендера: videotoolbox / nvenc / qsv.
+
+    Возвращает имя только если ffmpeg его знает И железо отвечает на пробном
+    кадре. При любой ошибке рендер один раз повторится на libx264.
+    """
+    if "value" in _HW_CACHE:
+        return _HW_CACHE["value"]
+    if os.environ.get("VIRALCUT_HW_ENCODE", "auto").strip().lower() in ("0", "false", "no", "off"):
+        _HW_CACHE["value"] = None
+        return None
+    preferred = {"darwin": ["h264_videotoolbox"], "win32": ["h264_nvenc", "h264_qsv"],
+                 "linux": ["h264_nvenc", "h264_qsv"]}.get(sys.platform, [])
+    try:
+        proc = run([ffmpeg(), "-hide_banner", "-encoders"])
+        text = (proc.stdout or "") + (proc.stderr or "")
+    except Exception:
+        text = ""
+    found = next((name for name in preferred if name in text and _hw_works(name)), None)
+    _HW_CACHE["value"] = found
+    return found
+
+
+def _video_args(encoder: Optional[str], crf: int, preset: str) -> List[str]:
+    if encoder:
+        return _hw_args(encoder, crf)
+    return ["-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+            "-profile:v", "high", "-pix_fmt", "yuv420p"]
+
+
+def _run_encode(cmd: List[str], duration: float,
+                on_progress: Optional[Callable[[float], None]]
+                ) -> Tuple[int, List[str], Optional[str]]:
+    """Запускает ffmpeg, качает прогресс и сторожит зависание."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            errors="replace", bufsize=1, **subprocess_kwargs())
+    assert proc.stdout is not None and proc.stderr is not None
+    tail: List[str] = []
+    stopped: List[str] = []
+
+    def _drain() -> None:
+        for line in proc.stderr:  # type: ignore[union-attr]
+            tail.append(line)
+            if len(tail) > 40:
+                tail.pop(0)
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
+    limit = max(180.0, duration * 8.0)
+
+    def _watchdog() -> None:
+        if proc.poll() is not None:
+            return
+        stopped.append(f"нет прогресса больше {limit:.0f} с")
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    timer = threading.Timer(limit, _watchdog)
+    timer.daemon = True
+    timer.start()
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if line.startswith("out_time_us=") and on_progress:
+                try:
+                    done = int(line.split("=", 1)[1]) / 1_000_000
+                except ValueError:
+                    continue
+                on_progress(round(min(0.99, done / duration), 3))
+        proc.wait()
+    finally:
+        timer.cancel()
+        reader.join(timeout=2)
+    return proc.returncode, tail, (stopped[0] if stopped else None)
 
 
 def _measure_loudness(source: Path, start: float, duration: float) -> Optional[Dict[str, Any]]:
@@ -190,81 +269,59 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
     else:
         cmd += ["-an"]
 
+    measured = _measure_loudness(source, clip_start, duration) if info["has_audio"] else None
+
+    def _compose(video_args: List[str]) -> List[str]:
+        """Собирает команду целиком: так откат на другой энкодер — это пересборка."""
+        built = [ffmpeg(), "-y", "-hide_banner", "-v", "error", "-nostats",
+                 "-progress", "pipe:1",
+                 "-ss", f"{clip_start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)]
+        built += ["-filter_complex", filter_complex, "-map", vlabel]
+        if info["has_audio"]:
+            if measured:
+                audio_filter = (
+                    "loudnorm=I=-14:TP=-1.5:LRA=11"
+                    f":measured_I={measured['input_i']}:measured_TP={measured['input_tp']}"
+                    f":measured_LRA={measured['input_lra']}:measured_thresh={measured['input_thresh']}"
+                    f":offset={measured['target_offset']}:linear=true"
+                )
+            else:
+                audio_filter = "loudnorm=I=-14:TP=-1.5:LRA=11"
+            fade_out = max(0.0, duration - 0.06)
+            audio_filter += f",afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out:.3f}:d=0.05"
+            built += ["-map", "0:a:0", "-af", audio_filter,
+                      "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+        else:
+            built += ["-an"]
+        built += video_args + ["-r", "30", "-movflags", "+faststart", "-shortest", str(out_path)]
+        return built
+
     hw = hw_encoder()
-    video_args = _hw_args(hw, crf) if hw else ["-c:v", "libx264", "-preset", preset,
-                                               "-crf", str(crf), "-profile:v", "high",
-                                               "-pix_fmt", "yuv420p"]
-    cmd += video_args + ["-r", "30", "-movflags", "+faststart", "-shortest", str(out_path)]
-
-    # -progress в cmd даёт машинно-читаемый прогресс: UI не «замирает» на минуту.
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            errors="replace", bufsize=1, **subprocess_kwargs())
-    assert proc.stdout is not None and proc.stderr is not None
-
-    tail: list = []
-    killed = {"hit": False, "reason": ""}
-
-    def _drain_stderr() -> None:
-        for line in proc.stderr:  # type: ignore[union-attr]
-            tail.append(line)
-            if len(tail) > 40:
-                tail.pop(0)
-
-    reader = threading.Thread(target=_drain_stderr, daemon=True)
-    reader.start()
-
-    # Щедрый, но конечный предел: зависший ffmpeg не должен держать клип вечно.
-    limit = max(180.0, duration * 8.0)
-
-    def _watchdog() -> None:
-        if proc.poll() is not None:
-            return
-        killed["hit"] = True
-        killed["reason"] = f"нет прогресса больше {limit:.0f} с"
-        try:
-            proc.kill()
-        except Exception:
-            pass
-
-    timer = threading.Timer(limit, _watchdog)
-    timer.daemon = True
-    timer.start()
-    try:
-        for line in proc.stdout:
-            line = line.strip()
-            if line.startswith("out_time_us=") and on_progress:
-                try:
-                    done = int(line.split("=", 1)[1]) / 1_000_000
-                except ValueError:
-                    continue
-                on_progress(round(min(0.99, done / duration), 3))
-        proc.wait()
-    finally:
-        timer.cancel()
-        reader.join(timeout=2)
-
-    if killed["hit"]:
+    plan: List[Optional[str]] = ([hw] if hw else []) + [None]
+    tail_text = ""
+    stop_reason: Optional[str] = None
+    code = 1
+    for attempt, encoder in enumerate(plan):
         out_path.unlink(missing_ok=True)
-        raise MediaError(f"Рендер остановлен: {killed['reason']}. Попробуйте ещё раз.")
-    if hw and (proc.returncode != 0 or not out_path.exists()):
-        # аппаратный энкодер не завёлся (нет GPU/драйвера) — повторяем на libx264
-        idx = cmd.index("-c:v")
-        cmd[idx + 1:idx + 1 + len(_hw_args(hw, crf)) - 1] = []
-        cmd[idx:idx + len(_hw_args(hw, crf))] = ["-c:v", "libx264", "-preset", preset,
-                                                 "-crf", str(crf), "-profile:v", "high",
-                                                 "-pix_fmt", "yuv420p"]
+        cmd = _compose(_video_args(encoder, crf, preset))
+        code, tail, stop_reason = _run_encode(cmd, duration, on_progress if attempt == 0 else None)
+        tail_text = "".join(tail)
+        if stop_reason:
+            break
+        if code == 0 and out_path.exists() and out_path.stat().st_size >= 10000:
+            break
+        if encoder is not None:
+            # железо не справилось — повторяем на CPU, не ломая команду
+            print(f"[render] {encoder} не сработал, повтор на libx264", file=sys.stderr, flush=True)
+
+    if stop_reason:
         out_path.unlink(missing_ok=True)
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, errors="replace", bufsize=1, **subprocess_kwargs())
-        tail = []
-        if proc.stderr is not None:
-            for line in proc.stderr:
-                tail.append(line)
-                if len(tail) > 40:
-                    tail.pop(0)
-        proc.wait()
-    if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size < 10000:
-        raise MediaError("Не удалось отрендерить клип: " + "".join(tail)[-600:])
+        raise MediaError(f"Рендер остановлен: {stop_reason}. Попробуйте ещё раз.")
+    if code != 0 or not out_path.exists() or out_path.stat().st_size < 10000:
+        hint = ""
+        if hw and "libx264" not in tail_text:
+            hint = " Попробуйте отключить аппаратный энкодер: VIRALCUT_HW_ENCODE=0."
+        raise MediaError("Не удалось отрендерить клип: " + tail_text[-600:] + hint)
 
     if on_progress:
         on_progress(1.0)

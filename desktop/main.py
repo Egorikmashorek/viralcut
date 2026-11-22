@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import faulthandler
@@ -335,13 +336,55 @@ def _node_name() -> str:
     return "node.exe" if IS_WINDOWS else "node"
 
 
+def _vendor_ready(path: Path) -> bool:
+    return ((path / _node_name()).exists()
+            and (path / "pot" / "build" / "main.js").exists())
+
+
+def _extract_vendor(archive: Path, dest: Path) -> None:
+    """Распаковывает vendor.tar.gz (Node + PO-провайдер) атомарно."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.parent / "vendor.tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True)
+    with tarfile.open(archive, "r:gz") as tar:
+        try:
+            tar.extractall(tmp, filter="data")  # Python 3.12+
+        except TypeError:
+            tar.extractall(tmp)
+    shutil.rmtree(dest, ignore_errors=True)
+    tmp.rename(dest)
+    node = dest / _node_name()
+    if node.exists() and not IS_WINDOWS:
+        node.chmod(0o755)
+
+
 def vendor_dir(data_dir: Path) -> Path:
-    """Возвращает папку с Node и PO-провайдером, распаковывая архив при первом запуске."""
+    """Возвращает папку с Node и PO-провайдером, распаковывая архив при первом запуске.
+
+    Из исходников папка `desktop/vendor` обычно уже есть; если её нет (например,
+    распаковали только архив тестовой сборки), распаковываем `vendor.tar.gz`
+    в папку данных — так Windows-тест из исходников и упакованное приложение
+    ведут себя одинаково.
+    """
+    source_vendor = Path(__file__).resolve().parent / "vendor"
     if not getattr(sys, "frozen", False):
-        return Path(__file__).resolve().parent / "vendor"
+        if _vendor_ready(source_vendor):
+            return source_vendor
+        dest = data_dir / "runtime" / "vendor"
+        if _vendor_ready(dest):
+            return dest
+        archive = Path(__file__).resolve().parent / "vendor.tar.gz"
+        if archive.is_file():
+            try:
+                _extract_vendor(archive, dest)
+            except Exception as exc:  # noqa: BLE001 — без Node просто нет HD
+                print(f"vendor не распакован: {exc}", flush=True)
+                return source_vendor
+        return dest
+
     dest = data_dir / "runtime" / "vendor"
-    node_name = _node_name()
-    if (dest / node_name).exists() and (dest / "pot" / "build" / "main.js").exists():
+    if _vendor_ready(dest):
         return dest
 
     exe = Path(sys.executable).resolve()
@@ -355,20 +398,10 @@ def vendor_dir(data_dir: Path) -> Path:
     archive = next((c for c in candidates if c.is_file()), None)
     if archive is None:
         return dest
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.parent / "vendor.tmp"
-    shutil.rmtree(tmp, ignore_errors=True)
-    tmp.mkdir(parents=True)
-    with tarfile.open(archive, "r:gz") as tar:
-        try:
-            tar.extractall(tmp, filter="data")  # Python 3.12+
-        except TypeError:
-            tar.extractall(tmp)
-    shutil.rmtree(dest, ignore_errors=True)
-    tmp.rename(dest)
-    node = dest / node_name
-    if node.exists() and not IS_WINDOWS:
-        node.chmod(0o755)
+    try:
+        _extract_vendor(archive, dest)
+    except Exception as exc:  # noqa: BLE001
+        print(f"vendor не распакован: {exc}", flush=True)
     return dest
 
 
@@ -456,6 +489,207 @@ def _acquire_instance_lock(data_dir: Path):
         return None
 
 
+# Дескриптор для faulthandler держим живым: закрытый файл = потерянный дамп.
+_CRASH_FILES: List[Any] = []
+
+
+def _prepare_log(data_dir: Path, max_bytes: int = 8 * 1024 * 1024) -> Path:
+    """Путь к app.log с ротацией: длинный лог не должен расти бесконечно.
+
+    Ротация делается до открытия файла: приложение дописывает лог, а старый
+    сдвигается в app.log.1 — так предыдущая авария не теряется.
+    """
+    log_path = data_dir / "app.log"
+    try:
+        if log_path.is_file() and log_path.stat().st_size > max_bytes:
+            backup = data_dir / "app.log.1"
+            try:
+                backup.unlink(missing_ok=True)
+            except OSError:
+                pass
+            log_path.replace(backup)
+    except OSError:
+        pass
+    return log_path
+
+
+def _install_crash_logging(log_path: Path, log: Any) -> None:
+    """faulthandler + перехват исключений потоков: пишем всё в app.log.
+
+    faulthandler пишет в отдельный НЕбуферизованный файл: при нативном падении
+    буфер текстового лога может не успеть сброситься на диск, и дамп стека
+    потеряется. Поэтому `-version`-лог и дамп живут в одном файле, но через
+    разные дескрипторы.
+    """
+    crash_file = None
+    try:
+        crash_file = open(log_path, "ab", buffering=0)  # noqa: SIM115 — живёт до выхода
+        _CRASH_FILES.append(crash_file)
+        faulthandler.enable(file=crash_file, all_threads=True)
+    except Exception:
+        try:
+            faulthandler.enable(all_threads=True)
+        except Exception:
+            pass
+
+    def _sig(name: str) -> None:
+        # register() есть только на Unix; на Windows дампы даёт enable().
+        # Регистрируем ТОЛЬКО сигналы штатного завершения: фатальные (SEGV/ABRT)
+        # должен писать enable() — он добавляет заголовок «Fatal Python error»,
+        # по которому разбор лога отличает краш от «приложение закрыли снаружи».
+        if not hasattr(faulthandler, "register") or not crash_file:
+            return
+        try:
+            value = getattr(signal, name, None)
+            if value is None:
+                return
+            faulthandler.register(value, file=crash_file, all_threads=True, chain=True)
+        except Exception:
+            pass
+
+    # SIGTERM/SIGINT: приложение закрывают снаружи — в лог попадёт стек потоков
+    for name in ("SIGTERM", "SIGINT"):
+        _sig(name)
+
+    def _excepthook(exc_type, exc_value, exc_tb) -> None:
+        print("=== uncaught exception (main thread) ===", file=log, flush=True)
+        traceback.print_exception(exc_type, exc_value, exc_tb, file=log)
+        print(f"=== {APP_NAME} stop after uncaught exception ===", file=log, flush=True)
+        try:
+            log.flush()
+        except Exception:
+            pass
+
+    def _thread_excepthook(args: Any) -> None:
+        print(f"=== uncaught exception in thread {getattr(args.thread, 'name', '?')} ===",
+              file=log, flush=True)
+        traceback.print_exception(args.exc_type, args.exc_value, args.exc_traceback, file=log)
+        try:
+            log.flush()
+        except Exception:
+            pass
+
+    sys.excepthook = _excepthook  # type: ignore[assignment]
+    try:
+        threading.excepthook = _thread_excepthook  # type: ignore[assignment]
+    except Exception:
+        pass
+
+
+def _webview2_version() -> str:
+    """Версия WebView2 Runtime из реестра Windows (пустая строка — не найден)."""
+    if not IS_WINDOWS:
+        return ""
+    try:
+        import winreg  # type: ignore[import-not-found]
+
+        guid = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+        candidates = [
+            (winreg.HKEY_LOCAL_MACHINE,
+             rf"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{guid}"),
+            (winreg.HKEY_LOCAL_MACHINE,
+             rf"SOFTWARE\Microsoft\EdgeUpdate\Clients\{guid}"),
+            (winreg.HKEY_CURRENT_USER,
+             rf"Software\Microsoft\EdgeUpdate\Clients\{guid}"),
+        ]
+        for root, path in candidates:
+            try:
+                with winreg.OpenKey(root, path) as key:
+                    value, _ = winreg.QueryValueEx(key, "pv")
+                    if value:
+                        return str(value)
+            except OSError:
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _fatal_dialog(text: str) -> None:
+    """Показать ошибку пользователю. На Windows — MessageBox (прототипы явные).
+
+    Без argtypes/restype ctypes мог бы испортить стек на 64-битной Windows —
+    ровно та ошибка, из-за которой падал мониторинг GPU.
+    """
+    if not IS_WINDOWS:
+        return
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        user32.MessageBoxW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p,
+                                       ctypes.c_wchar_p, ctypes.c_uint]
+        user32.MessageBoxW.restype = ctypes.c_int
+        user32.MessageBoxW(None, text[:1500], f"{APP_NAME} — ошибка", 0x10)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _startup_selfcheck() -> None:
+    """Пишет в app.log всё, что нужно для разбора проблем на чужой машине.
+
+    Строки с префиксом [selfcheck] пользователь присылает вместе с логом: по ним
+    сразу видно, чем собран ffmpeg, есть ли ffprobe, где модель и как читается GPU.
+    """
+    def emit(text: str) -> None:
+        print(f"[selfcheck] {text}", flush=True)
+
+    try:
+        from viralcut import config as vc_config
+
+        binary = vc_config.ffmpeg()
+        emit(f"ffmpeg: {binary}")
+        try:
+            proc = subprocess.run(
+                [binary, "-hide_banner", "-version"], capture_output=True, text=True,
+                timeout=20, creationflags=(0x08000000 if IS_WINDOWS else 0))
+            first = (proc.stdout or "").splitlines()[0] if proc.stdout else "нет вывода"
+            emit(f"ffmpeg-version: {first}")
+        except Exception as exc:  # noqa: BLE001
+            emit(f"ffmpeg-version: ОШИБКА {exc}")
+        emit(f"ffprobe: {vc_config.ffprobe() or 'нет'}")
+    except Exception as exc:  # noqa: BLE001
+        emit(f"ffmpeg: ОШИБКА {exc}")
+
+    emit(f"model: {os.environ.get('VIRALCUT_WHISPER_DIR') or 'скачается при первом запуске'}")
+    try:
+        from viralcut import system_stats
+
+        gpu = system_stats.gpu()
+        source = gpu.get("source") or ("ioreg" if IS_MACOS else "none")
+        emit(f"gpu: {gpu.get('name') or '?'} | {gpu.get('percent')}% | источник: {source}")
+    except Exception as exc:  # noqa: BLE001
+        emit(f"gpu: ОШИБКА {exc}")
+
+    if IS_WINDOWS:
+        version = _webview2_version()
+        emit(f"webview2: {version or 'не найден в реестре'}")
+    try:
+        import webview
+
+        emit(f"webview: {getattr(webview, '__version__', '?')}")
+    except Exception as exc:  # noqa: BLE001
+        emit(f"webview: НЕ ЗАГРУЖАЕТСЯ {exc}")
+
+
+def _startup_error_text(exc: Exception, data_dir: Path) -> str:
+    """Понятный текст ошибки запуска вместо голого трейсбека."""
+    message = str(exc)
+    low = message.lower()
+    log = data_dir / "app.log"
+    if "webview2" in low or "edgechromium" in low or "webview" in low or "microsoft.web" in low:
+        return ("Не удалось открыть окно: не установлен WebView2 Runtime.\n"
+                "Скачайте «Microsoft Edge WebView2 Runtime» с сайта Microsoft "
+                "и запустите приложение снова.\n\n"
+                f"Подробности в журнале:\n{log}")
+    if "python.runtime" in low or "pythonnet" in low or "clr" in low:
+        return ("Не удалось загрузить оболочку окна (pythonnet).\n"
+                "Переустановите приложение или запустите install_windows.bat.\n\n"
+                f"Подробности в журнале:\n{log}")
+    return (f"Не удалось запустить {APP_NAME}.\n\n{message[:600]}\n\n"
+            f"Подробности в журнале:\n{log}")
+
+
 def main() -> None:
     data_dir = default_data_dir()
     setup_paths(data_dir)
@@ -468,18 +702,22 @@ def main() -> None:
             pass
         return
 
-    log_path = data_dir / "app.log"
+    log_path = _prepare_log(data_dir)
     log = open(log_path, "a", buffering=1, encoding="utf-8")
     sys.stdout = log  # type: ignore[assignment]
     sys.stderr = log  # type: ignore[assignment]
     print(f"\n=== {APP_NAME} start {time.strftime('%Y-%m-%d %H:%M:%S')} ===", flush=True)
+    _install_crash_logging(log_path, log)
     try:
-        faulthandler.enable(open(log_path, "a", buffering=1, encoding="utf-8"))
-    except Exception:
-        pass
+        from viralcut._version import __version__ as app_version
+    except Exception:  # noqa: BLE001 — версия не критична для запуска
+        app_version = "unknown"
+    print(f"version: {app_version}", flush=True)
     print(f"data: {data_dir}", flush=True)
     print(f"platform: {sys.platform}", flush=True)
     print(f"frozen: {getattr(sys, 'frozen', False)}", flush=True)
+    print(f"log: {log_path}", flush=True)
+    _startup_selfcheck()
 
     pot_proc = None
     server = None
@@ -558,11 +796,26 @@ def main() -> None:
         shutdown()
         time.sleep(0.3)
         clean_exit = True
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
         print(traceback.format_exc(), flush=True)
+        try:
+            log.flush()
+        except Exception:
+            pass
+        _fatal_dialog(_startup_error_text(exc, data_dir))
         raise
     finally:
         shutdown()
+        try:
+            if clean_exit:
+                print(f"=== {APP_NAME} stop {time.strftime('%Y-%m-%d %H:%M:%S')} ===",
+                      flush=True)
+            else:
+                print(f"=== {APP_NAME} exit without stop marker {time.strftime('%Y-%m-%d %H:%M:%S')} ===",
+                      flush=True)
+            log.flush()
+        except Exception:
+            pass
         if clean_exit and getattr(sys, "frozen", False):
             # pywebview/WebKit на macOS иногда падает уже после закрытия окна;
             # аккуратно завершаем процесс, не давая системе показать «ошибку».

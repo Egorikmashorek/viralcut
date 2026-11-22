@@ -99,6 +99,55 @@ def _cookie_opts(browser: Optional[str]) -> Dict[str, Any]:
     return {"cookiesfrombrowser": (browser, None, None, None)}
 
 
+def ytdlp_ffmpeg(opts: Dict[str, Any]) -> Dict[str, Any]:
+    """Готовит окружение yt-dlp к работе с нашим ffmpeg и возвращает opts.
+
+    Две ловушки, из-за которых падало «ffmpeg is not installed» на частичном
+    скачивании (download_ranges):
+      1. `ffmpeg_location` читают только постпроцессоры. Проверка
+         `FFmpegFD.available()` для частичной загрузки смотрит в PATH, поэтому
+         папку с каноническим `ffmpeg` обязательно добавляем в PATH.
+      2. Даже с правильным PATH постпроцессоры берут путь из contextvar
+         FFmpegPostProcessor._ffmpeg_location — выставляем и его: в бандле .app
+         PATH может быть урезан до системного.
+    """
+    ensure_path()
+    bin_dir = str(ffmpeg_bin_dir())
+    opts["ffmpeg_location"] = bin_dir
+    try:
+        from yt_dlp.postprocessor.ffmpeg import FFmpegPostProcessor
+
+        FFmpegPostProcessor._ffmpeg_location.set(bin_dir)
+    except Exception:  # noqa: BLE001 — старые версии yt-dlp этого поля не имеют
+        pass
+    return opts
+
+
+def ytdlp_ffmpeg_ready() -> bool:
+    """Проверяет ровно то, что проверяет yt-dlp перед частичным скачиванием."""
+    ensure_path()
+    try:
+        from yt_dlp.downloader.external import FFmpegFD
+
+        return bool(FFmpegFD.available())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ffmpeg_missing_error() -> DownloadError:
+    """Понятная ошибка вместо misleading «ffmpeg is not installed»."""
+    try:
+        binary = ffmpeg()
+    except Exception:  # noqa: BLE001
+        binary = "не найден"
+    return DownloadError(
+        "yt-dlp не смог запустить ffmpeg для частичного скачивания. "
+        f"Бинарник: {binary}. Проверьте, что он запускается "
+        f"({Path(binary).name if binary != 'не найден' else 'ffmpeg'} -version), "
+        "или задайте путь в VIRALCUT_FFMPEG. Полный лог — в app.log."
+    )
+
+
 def _clean_partials(dest_dir: Path) -> None:
     for pattern in ("source.*.part", "source.*.ytdl", "source.part", "source.mp4.part"):
         for path in dest_dir.glob(pattern):
@@ -188,7 +237,6 @@ def _attempt(url: str, dest_dir: Path, fmt: str, clients: Optional[List[str]],
         "concurrent_fragment_downloads": 4,
         "writesubtitles": False,
         "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}],
-        "ffmpeg_location": str(ffmpeg_bin_dir()),
         "socket_timeout": 30,
     }
     if extractor_args:
@@ -205,6 +253,7 @@ def _attempt(url: str, dest_dir: Path, fmt: str, clients: Optional[List[str]],
         if os.environ.get("VIRALCUT_NODE"):
             opts["js_runtimes"] = {"node": {"path": os.environ["VIRALCUT_NODE"]}}
     opts.update(_cookie_opts(browser))
+    ytdlp_ffmpeg(opts)
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -747,7 +796,6 @@ def download_audio(url: str, dest_dir: Path, progress: ProgressCb = None,
         "retries": 3,
         "fragment_retries": 5,
         "concurrent_fragment_downloads": 4,
-        "ffmpeg_location": str(ffmpeg_bin_dir()),
         "socket_timeout": 30,
     }
     if is_youtube(url) and _pot_enabled() and os.environ.get("VIRALCUT_POT_URL"):
@@ -758,6 +806,7 @@ def download_audio(url: str, dest_dir: Path, progress: ProgressCb = None,
         if os.environ.get("VIRALCUT_NODE"):
             opts["js_runtimes"] = {"node": {"path": os.environ["VIRALCUT_NODE"]}}
     opts.update(_cookie_opts(browser))
+    ytdlp_ffmpeg(opts)
     info = None
     for reconnect in range(2):
         try:
@@ -848,6 +897,10 @@ def download_section(url: str, dest_dir: Path, start: float, end: float,
     dest_dir.mkdir(parents=True, exist_ok=True)
     if is_direct_media(url):
         return _cut_direct_section(url, dest_dir, start, end, progress, max_height, quality)
+    if not ytdlp_ffmpeg_ready():
+        # Без запускаемого ffmpeg yt-dlp откажется резать диапазоны и вернёт
+        # «ffmpeg is not installed». Проверяем заранее — и говорим по-человечески.
+        raise _ffmpeg_missing_error()
     outtmpl = str(dest_dir / "section.%(ext)s")
     if max_height <= 360:
         fmt = FORMAT_SD
@@ -906,7 +959,6 @@ def download_section(url: str, dest_dir: Path, start: float, end: float,
             "concurrent_fragment_downloads": 2,
             "download_ranges": download_range_func(None, [(start, end)]),
             "force_keyframes_at_cuts": True,
-            "ffmpeg_location": str(ffmpeg_bin_dir()),
             "socket_timeout": 30,
         }
         if clients:
@@ -916,6 +968,7 @@ def download_section(url: str, dest_dir: Path, start: float, end: float,
                     "base_url": [os.environ["VIRALCUT_POT_URL"]]}
                 opts["js_runtimes"] = {"node": {"path": os.environ["VIRALCUT_NODE"]}}
         opts.update(_cookie_opts(browser))
+        ytdlp_ffmpeg(opts)
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.extract_info(url, download=True)

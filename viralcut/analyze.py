@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import re
+import subprocess
+import threading
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import utils
+from .config import ffmpeg
 
 # --- Лексиконы ---------------------------------------------------------------
 
@@ -295,6 +298,32 @@ def energy_curve(media: Path, hop: float = 0.25) -> Tuple[List[float], float]:
         return [], -30.0
 
 
+# Кривая громкости нужна и поиску моментов, и вырезанию пауз, и подтяжке краёв.
+# Без кэша один и тот же исходник декодировался по разу на каждый клип.
+_ENERGY_CACHE: Dict[Tuple[str, float, int, float], Tuple[List[float], float]] = {}
+_ENERGY_LOCK = threading.Lock()
+_ENERGY_CACHE_MAX = 4
+
+
+def cached_energy_curve(media: Path, hop: float = 0.25) -> Tuple[List[float], float]:
+    """energy_curve с кэшем по файлу (путь + mtime + размер)."""
+    try:
+        stat = Path(media).stat()
+        key = (str(Path(media).resolve()), round(stat.st_mtime, 3), int(stat.st_size), hop)
+    except OSError:
+        return energy_curve(media, hop)
+    with _ENERGY_LOCK:
+        hit = _ENERGY_CACHE.get(key)
+    if hit is not None:
+        return hit[0], hit[1]
+    value = energy_curve(media, hop)
+    with _ENERGY_LOCK:
+        if len(_ENERGY_CACHE) >= _ENERGY_CACHE_MAX:
+            _ENERGY_CACHE.clear()
+        _ENERGY_CACHE[key] = value
+    return value
+
+
 def _energy_stats(curve: List[float], mean_db: float, start: float, end: float, hop: float) -> Tuple[float, float]:
     """Средняя громкость и доля тишины в окне."""
     if not curve:
@@ -328,7 +357,10 @@ def _nearest_quiet(curve: List[float], mean_db: float, t: float, hop: float,
 
 
 def _score_window(sents: List[Dict[str, Any]], media_duration: float,
-                  curve: List[float], mean_db: float, hop: float) -> Tuple[float, Dict[str, float]]:
+                  curve: List[float], mean_db: float, hop: float,
+                  reactions: Optional[Dict[str, List[Dict[str, float]]]] = None,
+                  scenes: Optional[List[float]] = None
+                  ) -> Tuple[float, Dict[str, float]]:
     text = " ".join(s["text"] for s in sents)
     words = [w for s in sents for w in s["words"]]
     n_words = max(1, len(words))
@@ -398,6 +430,24 @@ def _score_window(sents: List[Dict[str, Any]], media_duration: float,
     tail = _norm(" ".join(s["text"] for s in sents[-1:]))
     payoff = 1.0 if ("?" in tail or re.search(r"\b(подпис|коммент|сохран|попроб|сделай)\b", tail)) else 0.45
 
+    # 8. Реакция аудитории: смех и аплодисменты — сильнейший сигнал «это
+    # стоит смотреть», но по тексту его не видно, поэтому считаем по звуку.
+    window_start, window_end = sents[0]["start"], sents[-1]["end"]
+    reaction = 0.0
+    if reactions:
+        laughter = _overlap_seconds(window_start, window_end, reactions.get("laughter") or [])
+        applause = _overlap_seconds(window_start, window_end, reactions.get("applause") or [])
+        reaction = min(1.0, (laughter * 1.0 + applause * 0.6) / max(2.0, dur * 0.15))
+
+    # 9. Сцена: клип, который начинается с монтажной склейки, выглядит цельно;
+    # частая смена сцен внутри окна — признак динамичного фрагмента.
+    visual = 0.0
+    if scenes:
+        inside = [t for t in scenes if window_start <= t <= window_end]
+        starts_on_cut = any(abs(window_start - t) <= 0.4 for t in scenes)
+        density = min(1.0, len(inside) / max(1.0, dur / 12.0))
+        visual = 0.6 * (1.0 if starts_on_cut else 0.0) + 0.4 * density
+
     score = (
         0.28 * hook
         + 0.18 * retention
@@ -406,11 +456,14 @@ def _score_window(sents: List[Dict[str, Any]], media_duration: float,
         + 0.12 * completeness
         + 0.12 * length_fit
         + 0.06 * payoff
+        + 0.07 * reaction
+        + 0.04 * visual
     )
     parts = {
         "hook": round(hook, 3), "retention": round(retention, 3), "emotion": round(emotion, 3),
         "specificity": round(specificity, 3), "completeness": round(completeness, 3),
         "length_fit": round(length_fit, 3), "payoff": round(payoff, 3),
+        "reaction": round(reaction, 3), "visual": round(visual, 3),
     }
     return round(min(1.0, max(0.0, score)), 4), parts
 
@@ -480,9 +533,19 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
     sents = build_sentences(segments)
     if not sents:
         return []
-    curve, mean_db = energy_curve(media)
+    curve, mean_db = cached_energy_curve(media)
     hop = 0.25
     ad_blocks = detect_ads(sents)
+    # Смех/аплодисменты и смены сцен — необязательные сигналы: без numpy,
+    # OpenCV или звука поиск моментов продолжает работать по тексту и громкости.
+    try:
+        reactions: Optional[Dict[str, List[Dict[str, float]]]] = audio_reactions(media)
+    except Exception:  # noqa: BLE001
+        reactions = None
+    try:
+        scenes: Optional[List[float]] = scene_changes(media)
+    except Exception:  # noqa: BLE001
+        scenes = None
 
     candidates: List[Dict[str, Any]] = []
     n = len(sents)
@@ -508,7 +571,8 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
                 if ad_blocks and _ad_overlap(w_start, w_end, ad_blocks) > max(1.5, span_len * 0.2):
                     # окно в основном про спонсора — в клипы не берём
                     break
-                score, parts = _score_window(window, duration, curve, mean_db, hop)
+                score, parts = _score_window(window, duration, curve, mean_db, hop,
+                                             reactions, scenes)
                 hook = _hook_bonus(window[0]["text"])
                 if hook:
                     score += hook
@@ -529,7 +593,8 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
         end = min(duration, sents[-1]["end"] + 0.3, start + max(8.0, max_dur))
         if end - start >= 3:
             chunk = sents
-            score, parts = _score_window(chunk, duration, curve, mean_db, hop)
+            score, parts = _score_window(chunk, duration, curve, mean_db, hop,
+                                         reactions, scenes)
             candidates.append({
                 "start": round(start, 3), "end": round(end, 3), "duration": round(end - start, 2),
                 "score": score, "parts": parts,
@@ -619,6 +684,13 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
                 end = block["end"]
         start = max(0.0, _nearest_quiet(curve, mean_db, start - 0.10, hop, window=0.30))
         end = min(duration, _nearest_quiet(curve, mean_db, end + 0.18, hop))
+        if scenes:
+            # начинать с монтажной склейки, а не посреди сцены; но не ценой
+            # обрезания ниже минимальной длины
+            nearest = min(scenes, key=lambda t: abs(t - start))
+            if (abs(nearest - start) <= 0.35 and end - nearest >= min_dur * 0.9
+                    and nearest < start + 0.35):
+                start = max(0.0, nearest)
         words = [w for w in c["words"] if w["end"] > start + 0.05 and w["start"] < end - 0.05]
         clip_text = " ".join(w["word"] for w in words)
         out.append({
@@ -702,3 +774,243 @@ def remap_words(words: List[Dict[str, Any]], spans: List[Dict[str, float]]
                         "start": round(max(0.0, w_start - span["start"]) + span["output"], 3),
                         "end": round(max(0.0, w_end - span["start"]) + span["output"], 3)})
     return out
+
+
+# --- Реакции аудитории и смены сцен -----------------------------------------
+#
+# Смех и аплодисменты — это не речь, и по тексту их не видно. Считаем по звуку:
+# смех — всплеск в 1.5–7 кГц с ритмичной огибающей 4–7 Гц («ха-ха-ха»), аплодисменты
+# — выровненный широкополосный шум с высокой спектральной плоскостью. Смена сцены
+# — скачок гистограммы между соседними кадрами (OpenCV). Обе вещи необязательные:
+# если numpy/OpenCV нет или файл не читается, поиск моментов работает как раньше.
+
+_SR = 16000
+_N_FFT = 512          # 32 мс — компромисс между частотой и разрешением огибающей
+_HOP = 256            # 16 мс
+_WIN_SECONDS = 1.0
+_STEP_SECONDS = 0.25
+
+
+def _frame_features(audio: Any) -> Optional[Dict[str, Any]]:
+    """Покадровые признаки: RMS, спектральная плоскость, доля ВЧ, переходы нуля."""
+    try:
+        import numpy as np
+    except Exception:  # noqa: BLE001
+        return None
+    if audio is None or len(audio) < _N_FFT:
+        return None
+    count = 1 + (len(audio) - _N_FFT) // _HOP
+    if count <= 0:
+        return None
+    window = np.hanning(_N_FFT).astype(np.float32)
+    freqs = np.fft.rfftfreq(_N_FFT, 1.0 / _SR)
+    high_band = (freqs >= 1500) & (freqs <= 7000)
+    rms = np.empty(count, dtype=np.float32)
+    flatness = np.empty(count, dtype=np.float32)
+    high_ratio = np.empty(count, dtype=np.float32)
+    zcr = np.empty(count, dtype=np.float32)
+    block = 1024
+    for start in range(0, count, block):
+        stop = min(count, start + block)
+        idx = np.arange(_N_FFT)[None, :] + _HOP * np.arange(start, stop)[:, None]
+        frames = audio[idx]
+        spec = np.abs(np.fft.rfft(frames * window, axis=1)) + 1e-10
+        power = spec * spec
+        total = power.sum(axis=1) + 1e-12
+        rms[start:stop] = np.sqrt(np.mean(frames * frames, axis=1) + 1e-12)
+        flatness[start:stop] = np.exp(np.mean(np.log(power), axis=1)) / (power.mean(axis=1) + 1e-12)
+        high_ratio[start:stop] = power[:, high_band].sum(axis=1) / total
+        signs = np.signbit(frames[:, 1:]) != np.signbit(frames[:, :-1])
+        zcr[start:stop] = signs.mean(axis=1)
+    return {"rms": rms, "flatness": flatness, "high_ratio": high_ratio,
+            "zcr": zcr, "sec_per_frame": _HOP / _SR}
+
+
+def _modulation(envelope: Any) -> float:
+    """Доля энергии огибающей в полосе 3–9 Гц: «ха-ха-ха» ритмично, аплодисменты — нет."""
+    try:
+        import numpy as np
+    except Exception:  # noqa: BLE001
+        return 0.0
+    if len(envelope) < 8:
+        return 0.0
+    centered = envelope - float(np.mean(envelope))
+    if not np.any(centered):
+        return 0.0
+    spectrum = np.abs(np.fft.rfft(centered * np.hanning(len(centered))))
+    freqs = np.fft.rfftfreq(len(centered), _HOP / _SR)
+    total = float(spectrum.sum()) + 1e-12
+    band = (freqs >= 3.0) & (freqs <= 9.0)
+    return float(spectrum[band].sum()) / total if np.any(band) else 0.0
+
+
+def _reaction_segments(features: Dict[str, Any], kind: str) -> List[Dict[str, float]]:
+    """Скользящее окно 1 с → отрезки, где признаки похожи на смех или аплодисменты.
+
+    Считаем сначала покадровые признаки, а окно считаем «сработавшим» только
+    если не меньше 75% кадров в нём подходят. Иначе окно, накрывшее тишину на
+    0.5 с, сдвигало границы реакции назад — клип начинался «за полсекунды до».
+    """
+    try:
+        import numpy as np
+    except Exception:  # noqa: BLE001
+        return []
+    spf = float(features["sec_per_frame"])
+    rms = features["rms"]
+    flatness = features["flatness"]
+    high_ratio = features["high_ratio"]
+    zcr = features["zcr"]
+    if len(rms) < 8:
+        return []
+    # «тишина» — 5-й процентиль: реакции на фоне тишины видно, а непрерывный
+    # гул/музыка не считаются «реакцией» сами по себе
+    quiet_floor = max(float(np.percentile(rms, 5)) * 2.0, 0.004)
+    if kind == "laughter":
+        frame_ok = ((high_ratio > 0.30) & (flatness > 0.015) & (flatness < 0.70)
+                    & (zcr > 0.05) & (zcr < 0.55) & (rms > quiet_floor))
+    else:
+        frame_ok = ((flatness > 0.05) & (high_ratio > 0.50)
+                    & (zcr > 0.26) & (rms > quiet_floor))
+
+    win = max(8, int(round(_WIN_SECONDS / spf)))
+    step = max(1, int(round(_STEP_SECONDS / spf)))
+    if len(rms) < win:
+        return []
+    # доля «подходящих» кадров в окне: у смеха огибающая ритмичная и часть кадров
+    # приходится на «провалы» между «ха», у аплодисментов шум ровный
+    min_active = 0.20 if kind == "laughter" else 0.60
+    positives: List[Tuple[float, float, float]] = []
+    for start in range(0, len(rms) - win + 1, step):
+        stop = start + win
+        env = rms[start:stop]
+        if float(np.mean(env > quiet_floor)) < min_active:
+            continue
+        mod = _modulation(env)
+        # признаки усредняем с весом по энергии: «провалы» между «ха» не
+        # размывают картину, а тишина вокруг реакции почти не влияет
+        weights = env.astype(np.float64) + 1e-9
+        flat = float(np.average(flatness[start:stop], weights=weights))
+        high = float(np.average(high_ratio[start:stop], weights=weights))
+        crossings = float(np.average(zcr[start:stop], weights=weights))
+        if kind == "laughter":
+            if mod <= 0.38 or not (0.02 < flat < 0.65) or high <= 0.30:
+                continue
+            if not (0.04 < crossings < 0.58):
+                continue
+            score = min(1.0, high * 1.6) * (0.45 + min(1.0, mod))
+        else:
+            if mod >= 0.55 or flat <= 0.05 or high <= 0.50 or crossings <= 0.24:
+                continue
+            score = min(1.0, flat * 4.0) * min(1.0, high * 1.2)
+        positives.append((start * spf, stop * spf, float(score)))
+
+    if not positives:
+        return []
+    merged: List[Dict[str, float]] = []
+    for start, stop, score in positives:
+        if merged and start - merged[-1]["end"] <= 0.35:
+            merged[-1]["end"] = round(stop, 2)
+            merged[-1]["score"] = round(max(merged[-1]["score"], score), 3)
+        else:
+            merged.append({"start": round(start, 2), "end": round(stop, 2),
+                           "score": round(score, 3)})
+
+    # края уточняем по сглаженной энергии ВЧ-полосы: окно, накрывшее тишину,
+    # иначе начинало клип «за полсекунды до реакции»
+    high_energy = (rms * high_ratio).astype(np.float32)
+    kernel_size = max(3, int(round(0.20 / spf)))
+    smooth = np.convolve(high_energy,
+                         np.ones(kernel_size, dtype=np.float32) / kernel_size, mode="same")
+    for seg in merged:
+        a = max(0, int(round(seg["start"] / spf)))
+        b = min(len(smooth), int(round(seg["end"] / spf)))
+        if b <= a:
+            continue
+        inside = smooth[a:b]
+        level = float(np.median(inside))
+        if level <= 0:
+            continue
+        threshold = max(quiet_floor * 0.02, level * 0.25)
+        inner = np.where(inside >= threshold)[0]
+        if len(inner):
+            seg["start"] = round((a + int(inner[0])) * spf, 2)
+            seg["end"] = round((a + int(inner[-1]) + 1) * spf, 2)
+
+    min_len = 0.6 if kind == "laughter" else 0.9
+    return [seg for seg in merged if seg["end"] - seg["start"] >= min_len]
+
+
+def audio_reactions(media: Path) -> Dict[str, List[Dict[str, float]]]:
+    """Смех и аплодисменты в дорожке: отрезки {start, end, score}."""
+    empty: Dict[str, List[Dict[str, float]]] = {"laughter": [], "applause": []}
+    try:
+        audio = utils.read_audio_mono(Path(media), _SR)
+    except Exception:  # noqa: BLE001 — нет звука/файла: реакций просто нет
+        return empty
+    features = _frame_features(audio)
+    if not features:
+        return empty
+    return {"laughter": _reaction_segments(features, "laughter"),
+            "applause": _reaction_segments(features, "applause")}
+
+
+def _overlap_seconds(start: float, end: float, segments: List[Dict[str, float]]) -> float:
+    total = 0.0
+    for seg in segments or []:
+        total += max(0.0, min(end, float(seg["end"])) - max(start, float(seg["start"])))
+    return total
+
+
+def scene_changes(media: Path, width: int = 96, height: int = 54,
+                  threshold: float = 0.42, limit: int = 3000) -> List[float]:
+    """Границы сцен (секунды) по гистограммам кадров через OpenCV.
+
+    Кадры берём только ключевые: в обычном монтаже сцена начинается с ключевого
+    кадра, поэтому полный декод не нужен — для часовой записи это секунды, а не
+    минуты. Кадры мелкие (96×54): для гистограммы детали не важны, зато 3000
+    кадров — это ~45 МБ вместо сотен. Гистограммы сравниваем cv2.compareHist:
+    плавное движение камеры скачком не считается, а склейка — считается.
+    """
+    try:
+        import cv2
+        import numpy as np
+    except Exception:  # noqa: BLE001 — без OpenCV работаем без сцен
+        return []
+    cmd = [ffmpeg(), "-hide_banner", "-nostats", "-v", "info",
+           "-skip_frame", "nokey", "-i", str(media), "-an",
+           # passthrough: иначе ffmpeg дорисовывает кадры до CFR (dup=…) и
+           # порядок «кадр ↔ pts_time» перестаёт совпадать
+           "-vf", f"scale={width}:{height}:flags=fast_bilinear,showinfo",
+           "-fps_mode", "passthrough",
+           "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=600,
+                              **utils.subprocess_kwargs())
+    except Exception:  # noqa: BLE001
+        return []
+    frame_size = width * height * 3
+    data = proc.stdout or b""
+    count = min(len(data) // frame_size, limit)
+    stderr = (proc.stderr or b"").decode("utf-8", "replace")
+    times = [float(x) for x in re.findall(r"pts_time:\s*([0-9.]+)", stderr)]
+    if count < 2 or len(times) < count:
+        return []
+    cuts: List[float] = []
+    previous = None
+    for i in range(count):
+        raw = data[i * frame_size:(i + 1) * frame_size]
+        frame = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3)
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        hist = cv2.calcHist([hsv], [0, 1], None, [24, 12], [0, 180, 0, 256])
+        cv2.normalize(hist, hist)
+        if previous is not None:
+            distance = float(cv2.compareHist(previous, hist, cv2.HISTCMP_BHATTACHARYYA))
+            if distance >= threshold:
+                cuts.append(round(times[i], 3))
+        previous = hist
+    # склейки ближе 0.3 с — это дребезг одного и того же перехода
+    clean: List[float] = []
+    for t in cuts:
+        if not clean or t - clean[-1] > 0.3:
+            clean.append(t)
+    return clean

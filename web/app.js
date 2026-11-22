@@ -253,6 +253,7 @@ const state = {
     subPos: "bottom",
     subOffset: 0,
     subSpeed: "calm",
+    cutPauses: false,
     cookies: "",
     fontTarget: "#fontSelect"
   }
@@ -382,6 +383,14 @@ function heroHTML() {
           </div>
         </div>
       </div>
+      <div class="opt">
+        ${optIcon("frame", "ico-blue")}
+        <span class="opt-label">Паузы</span>
+        <div class="opt-control">
+          <label class="toggle"><input type="checkbox" id="cutPausesToggle" ${o.cutPauses ? "checked" : ""}/><span class="track"></span><span>Вырезать паузы</span></label>
+          <span class="opt-hint">тишина и «эээ» убираются склейкой</span>
+        </div>
+      </div>
       <div class="opt wide">
         <span class="opt-head">${optIcon("style", "ico-pink")}<span class="opt-label">Стиль субтитров</span></span>
         <div class="substyle">
@@ -464,6 +473,8 @@ function bindHero() {
   }
   const subs = $("#subsToggle");
   if (subs) subs.addEventListener("change", () => { state.opts.subtitles = subs.checked; });
+  const cut = $("#cutPausesToggle");
+  if (cut) cut.addEventListener("change", () => { state.opts.cutPauses = cut.checked; });
 
   const cookies = $("#cookiesSelect");
   if (cookies) cookies.addEventListener("change", () => { state.opts.cookies = cookies.value; });
@@ -522,9 +533,9 @@ function heroOptions() {
     sub_position: state.opts.subPos,
     sub_offset: state.opts.subOffset,
     sub_speed: state.opts.subSpeed,
-  language: state.opts.language || "auto",
-    cookies_browser: state.opts.cookies,
-    language: state.opts.language || "auto"
+    cut_pauses: state.opts.cutPauses,
+    language: state.opts.language || "auto",
+    cookies_browser: state.opts.cookies
   };
 }
 
@@ -871,7 +882,8 @@ function clipsGridHTML() {
     const partsLine = sp ? [
       ["хук", sp.hook], ["подача", sp.retention], ["эмоции", sp.emotion],
       ["конкретика", sp.specificity], ["завершённость", sp.completeness],
-    ].filter(([, v]) => typeof v === "number")
+      ["реакция", sp.reaction], ["монтаж", sp.visual],
+    ].filter(([k, v]) => typeof v === "number" && (v > 0.02 || !["реакция", "монтаж"].includes(k)))
       .map(([k, v]) => `<span>${k} ${Math.round(v * 100)}</span>`).join("") : "";
     if (c.status === "error") {
       return `<div class="clip-card${wide}">
@@ -1766,6 +1778,7 @@ function openEditor(clipId) {
               <label class="toggle"><input type="checkbox" id="edSubs" ${s.subtitles !== false ? "checked" : ""}/><span class="track"></span><span>Показывать</span></label>
               <label class="toggle"><input type="checkbox" id="edUpper" ${s.uppercase !== false ? "checked" : ""}/><span class="track"></span><span>КАПСОМ</span></label>
               <label class="toggle"><input type="checkbox" id="edShowHook" ${s.show_hook !== false ? "checked" : ""}/><span class="track"></span><span>Хук сверху</span></label>
+              <label class="toggle"><input type="checkbox" id="edCutPauses" ${s.cut_pauses ? "checked" : ""}/><span class="track"></span><span>Вырезать паузы</span></label>
             </div>
           </div>
           <div class="row2">
@@ -1886,6 +1899,7 @@ function openEditor(clipId) {
       subtitles: $("#edSubs").checked,
       uppercase: $("#edUpper").checked,
       show_hook: $("#edShowHook").checked,
+      cut_pauses: $("#edCutPauses").checked,
       accent: chosenAccent,
       sub_font: $("#edFont").value,
       sub_size: Number($("#edSize").value),
@@ -2110,6 +2124,12 @@ function renderSystem(data) {
   if (chip) {
     const name = data.gpu && data.gpu.name ? String(data.gpu.name) : "";
     chip.textContent = name || (data.app && data.app.hw ? String(data.app.hw).replace("h264_", "") : "GPU");
+    // откуда цифра: pdh (Intel/AMD/NVIDIA), nvidia-smi или ADL для AMD
+    const gpu = data.gpu || {};
+    chip.title = [
+      gpu.vendor ? gpu.vendor.toUpperCase() : "",
+      gpu.source && gpu.source !== "none" ? `источник: ${gpu.source}` : ""
+    ].filter(Boolean).join(" · ");
   }
 
   // текущий процесс: что именно делает приложение
@@ -2193,6 +2213,12 @@ async function openSettings() {
         <div class="set-section">
           <label class="toggle"><input type="checkbox" id="setAskFolder" ${conf.ask_folder ? "checked" : ""}/><span class="track"></span><span>Спрашивать папку при каждом сохранении</span></label>
         </div>
+        <div class="set-section">
+          <div class="set-label">Журнал приложения</div>
+          <div class="set-hint">Если приложение закрылось само (например, при «Пересобрать»), здесь видно, на каком этапе это случилось и с какой ошибкой.</div>
+          <button class="btn-ghost" type="button" id="setDiag">Разобрать журнал</button>
+          <pre id="setDiagOut" class="diag-out hidden"></pre>
+        </div>
       </div>
       <div class="modal-foot">
         <button class="btn-ghost" data-close>Отмена</button>
@@ -2200,6 +2226,24 @@ async function openSettings() {
       </div>
     </div>`;
   $("#modal").classList.remove("hidden");
+  const diagBtn = $("#setDiag");
+  if (diagBtn) diagBtn.addEventListener("click", async () => {
+    const out = $("#setDiagOut");
+    diagBtn.disabled = true;
+    diagBtn.innerHTML = '<span class="spinner"></span> Читаю…';
+    try {
+      const data = await api("/api/diagnostics?tail=15");
+      if (out) {
+        out.textContent = data.report || "Пусто";
+        out.classList.remove("hidden");
+      }
+    } catch (err) {
+      toast(err.message, "err");
+    } finally {
+      diagBtn.disabled = false;
+      diagBtn.textContent = "Разобрать журнал";
+    }
+  });
   $("#setDownloadPick").addEventListener("click", () => chooseFolder("download"));
   $("#setClipsPick").addEventListener("click", () => chooseFolder("clips"));
   let encoder = conf.encoder || "auto";

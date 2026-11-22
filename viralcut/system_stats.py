@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import sys as _sys
 
@@ -223,65 +224,169 @@ def _memory_uncached() -> Dict[str, Any]:
 
 # --- Видеокарта ---------------------------------------------------------------
 
+# Счётчики PDH: раскрытие масок и чтение значений идут через pdh.dll.
+# Важно: без argtypes/restype ctypes на 64-битной Windows обрезает HANDLE до
+# 32 бит — PdhCloseQuery получает мусорный указатель и процесс падает прямо во
+# время опроса (симптом: «нажал Пересобрать — приложение закрылось без лога»).
+_ENGINE_RE = re.compile(
+    r"luid_(0x[0-9A-Fa-f]+)_(0x[0-9A-Fa-f]+)_phys_(\d+)_(?:eng_(\d+)_)?engtype_([A-Za-z0-9]+)")
+_PDH_LOCK = threading.Lock()
+_PDH_DLL: List[Any] = [None]
+_PDH_VALUE: List[Any] = [None]
+
+
+def _engine_key(counter_path: str) -> Tuple[str, str]:
+    """(адаптер, тип движка) из пути счётчика «GPU Engine»."""
+    match = _ENGINE_RE.search(counter_path or "")
+    if not match:
+        return "", ""
+    adapter = f"{match.group(1)}:{match.group(2)}:phys_{match.group(3)}"
+    return adapter, match.group(5).lower()
+
+
+def _summarize_engine_utilization(samples: List[Tuple[str, float]]) -> Dict[str, Any]:
+    """Суммирует 3D-движки по адаптеру и берёт самый занятый адаптер.
+
+    Windows отдаёт по экземпляру счётчика на каждый процесс и каждый движок.
+    Складывать все движки (как было раньше) — неверно: кодировщик видео и
+    копирование прибавлялись к 3D и цифра улетала в 100% на пустой карте.
+    """
+    per_adapter: Dict[str, float] = {}
+    for path, value in samples:
+        adapter, engine = _engine_key(path)
+        if not adapter or not engine.startswith("3d"):
+            continue
+        try:
+            amount = float(value)
+        except (TypeError, ValueError):
+            continue
+        if amount <= 0:
+            continue
+        per_adapter[adapter] = per_adapter.get(adapter, 0.0) + amount
+    if not per_adapter:
+        return {"percent": None, "adapters": 0}
+    busiest = max(per_adapter.values())
+    return {"percent": int(round(min(100.0, busiest))), "adapters": len(per_adapter)}
+
+
+def _pdh():
+    """Загруженный pdh.dll с явными прототипами функций (или None)."""
+    if _PDH_DLL[0] is not None:
+        return _PDH_DLL[0] or None
+    try:
+        from ctypes import wintypes as wt
+
+        pdh = ctypes.WinDLL("pdh.dll")  # type: ignore[attr-defined]
+
+        class PDH_FMT_COUNTERVALUE(ctypes.Structure):
+            class _Value(ctypes.Union):
+                _fields_ = [("longValue", wt.LONG),
+                            ("doubleValue", ctypes.c_double),
+                            ("largeValue", ctypes.c_longlong)]
+
+            _anonymous_ = ("value",)
+            _fields_ = [("CStatus", wt.DWORD), ("value", _Value)]
+
+        _PDH_VALUE[0] = PDH_FMT_COUNTERVALUE
+        pdh.PdhOpenQueryW.argtypes = [wt.LPCWSTR, ctypes.c_size_t,
+                                      ctypes.POINTER(wt.HANDLE)]
+        pdh.PdhOpenQueryW.restype = wt.LONG
+        pdh.PdhExpandWildCardPathW.argtypes = [wt.LPCWSTR, wt.LPCWSTR, wt.LPWSTR,
+                                               ctypes.POINTER(wt.DWORD), wt.DWORD]
+        pdh.PdhExpandWildCardPathW.restype = wt.LONG
+        pdh.PdhAddCounterW.argtypes = [wt.HANDLE, wt.LPCWSTR, ctypes.c_size_t,
+                                       ctypes.POINTER(wt.HANDLE)]
+        pdh.PdhAddCounterW.restype = wt.LONG
+        pdh.PdhCollectQueryData.argtypes = [wt.HANDLE]
+        pdh.PdhCollectQueryData.restype = wt.LONG
+        pdh.PdhGetFormattedCounterValue.argtypes = [
+            wt.HANDLE, wt.DWORD, ctypes.POINTER(wt.DWORD),
+            ctypes.POINTER(PDH_FMT_COUNTERVALUE)]
+        pdh.PdhGetFormattedCounterValue.restype = wt.LONG
+        pdh.PdhCloseQuery.argtypes = [wt.HANDLE]
+        pdh.PdhCloseQuery.restype = wt.LONG
+    except Exception:  # noqa: BLE001 — не Windows или pdh.dll недоступна
+        _PDH_DLL[0] = False
+        return None
+    _PDH_DLL[0] = pdh
+    return pdh
+
+
 def _gpu_windows_pdh() -> Dict[str, Any]:
     """Загрузка GPU через счётчики PDH — без запуска nvidia-smi и окон консоли.
 
     Windows отдаёт производительность видеокарты в счётчиках «GPU Engine».
-    Читаем их напрямую через pdh.dll: ни одного дочернего процесса.
+    Читаем их напрямую через pdh.dll: ни одного дочернего процесса. Счётчик
+    работает для NVIDIA, Intel и AMD сразу — вендорных DLL не нужно.
     """
     try:
-        import ctypes
         from ctypes import wintypes as wt
     except Exception:  # noqa: BLE001
         return {"percent": None, "name": ""}
-
-    try:
-        pdh = ctypes.WinDLL("pdh.dll")  # type: ignore[attr-defined]
-    except Exception:  # noqa: BLE001
+    pdh = _pdh()
+    if pdh is None:
         return {"percent": None, "name": ""}
 
-    query = wt.HANDLE()
-    if pdh.PdhOpenQueryW(None, ctypes.c_size_t(0), ctypes.byref(query)) != 0:
-        return {"percent": None, "name": ""}
+    with _PDH_LOCK:
+        query = wt.HANDLE()
+        if pdh.PdhOpenQueryW(None, ctypes.c_size_t(0), ctypes.byref(query)) != 0:
+            return {"percent": None, "name": ""}
+        try:
+            path = "\\GPU Engine(*)\\Utilization Percentage"
+            size = wt.DWORD(0)
+            pdh.PdhExpandWildCardPathW(None, path, None, ctypes.byref(size), wt.DWORD(0))
+            if size.value <= 0:
+                return {"percent": None, "name": ""}
+            buf = ctypes.create_unicode_buffer(size.value + 2)
+            if pdh.PdhExpandWildCardPathW(None, path, buf, ctypes.byref(size),
+                                          wt.DWORD(0)) != 0:
+                return {"percent": None, "name": ""}
+            counters: List[Tuple[str, Any]] = []
+            for counter_path in buf[:size.value].split("\0"):
+                if not counter_path or "engtype_3d" not in counter_path.lower():
+                    continue
+                handle = wt.HANDLE()
+                if pdh.PdhAddCounterW(query, counter_path, ctypes.c_size_t(0),
+                                      ctypes.byref(handle)) == 0:
+                    counters.append((counter_path, handle))
+            if not counters:
+                return {"percent": None, "name": ""}
 
-    path = "\\GPU Engine(*)\\Utilization Percentage"
-    size = wt.DWORD(0)
-    pdh.PdhExpandWildCardPathW(None, path, None, ctypes.byref(size), wt.DWORD(0))
-    if size.value <= 0:
-        pdh.PdhCloseQuery(query)
-        return {"percent": None, "name": ""}
+            if pdh.PdhCollectQueryData(query) != 0:
+                return {"percent": None, "name": ""}
+            time.sleep(0.08)  # PDH считает процент по двум замерам
+            if pdh.PdhCollectQueryData(query) != 0:
+                return {"percent": None, "name": ""}
 
-    buf = ctypes.create_unicode_buffer(size.value + 2)
-    if pdh.PdhExpandWildCardPathW(None, path, buf, ctypes.byref(size), wt.DWORD(0)) != 0:
-        pdh.PdhCloseQuery(query)
-        return {"percent": None, "name": ""}
+            samples: List[Tuple[str, float]] = []
+            PDH_FMT_DOUBLE = 0x00000200
+            for counter_path, handle in counters:
+                value = _PDH_VALUE[0]()
+                counter_type = wt.DWORD(0)
+                status = pdh.PdhGetFormattedCounterValue(
+                    handle, PDH_FMT_DOUBLE, ctypes.byref(counter_type), ctypes.byref(value))
+                # PDH_CSTATUS_VALID_DATA (0) / PDH_CSTATUS_NEW_DATA (1)
+                if status == 0 and value.CStatus in (0, 1):
+                    samples.append((counter_path, value.doubleValue))
+            summary = _summarize_engine_utilization(samples)
+            if summary.get("percent") is None:
+                return {"percent": None, "name": ""}
+            return {"percent": summary["percent"], "name": "GPU",
+                    "adapters": summary.get("adapters", 0)}
+        finally:
+            pdh.PdhCloseQuery(query)
 
-    counters = []
-    for counter_path in buf[:size.value].split("\0"):
-        if not counter_path or "engtype_3d" not in counter_path.lower():
-            continue
-        handle = wt.HANDLE()
-        if pdh.PdhAddCounterW(query, counter_path, ctypes.c_size_t(0), ctypes.byref(handle)) == 0:
-            counters.append(handle)
-    if not counters:
-        pdh.PdhCloseQuery(query)
-        return {"percent": None, "name": ""}
 
-    pdh.PdhCollectQueryData(query)
-    time.sleep(0.08)
-    pdh.PdhCollectQueryData(query)
-
-    total = 0.0
-    PDH_FMT_DOUBLE = 0x00000200
-    for handle in counters:
-        value = ctypes.c_double(0.0)
-        counter_type = wt.DWORD(0)
-        if pdh.PdhGetFormattedCounterValue(handle, PDH_FMT_DOUBLE, ctypes.byref(counter_type),
-                                           ctypes.byref(value)) == 0:
-            total += max(0.0, value.value)
-    pdh.PdhCloseQuery(query)
-    percent = int(round(min(100.0, total)))
-    return {"percent": percent, "name": "GPU"}
+def _gpu_vendor(name: str) -> str:
+    """Вендор по имени адаптера — для подписи в виджете."""
+    low = (name or "").lower()
+    if "nvidia" in low or "geforce" in low or "quadro" in low or "rtx " in low or "gtx " in low:
+        return "nvidia"
+    if "amd" in low or "radeon" in low or "ati " in low:
+        return "amd"
+    if "intel" in low or "arc" in low or "iris" in low or "uhd" in low:
+        return "intel"
+    return ""
 
 
 def _gpu_windows_registry_name() -> str:
@@ -297,16 +402,128 @@ def _gpu_windows_registry_name() -> str:
         return "GPU"
 
 
+def _gpu_windows_adl() -> Dict[str, Any]:
+    """AMD (ADL): активность GPU в процентах через atiadlxx.dll.
+
+    Нужна как последний запасной путь: PDH-счётчики иногда отключены групповой
+    политикой, а nvidia-smi есть только у NVIDIA. Любая ошибка загрузки/вызова
+    означает «нет данных» — мониторинг не должен ронять приложение.
+    """
+    try:
+        from ctypes import wintypes as wt
+    except Exception:  # noqa: BLE001
+        return {"percent": None, "name": "", "vendor": "amd"}
+    adl = None
+    for dll_name in ("atiadlxx.dll", "atiadlxy.dll"):
+        try:
+            adl = ctypes.WinDLL(dll_name)  # type: ignore[attr-defined]
+            break
+        except Exception:  # noqa: BLE001
+            continue
+    if adl is None:
+        return {"percent": None, "name": "", "vendor": "amd"}
+
+    buffers: List[Any] = []
+    CALLBACK = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_int)
+
+    def _alloc(size: int) -> int:
+        buf = ctypes.create_string_buffer(max(1, int(size)))
+        buffers.append(buf)          # держим ссылку: ADL не копирует буфер
+        if len(buffers) > 64:
+            buffers.pop(0)
+        return ctypes.addressof(buf)
+
+    callback = CALLBACK(_alloc)
+    context = ctypes.c_void_p()
+    try:
+        if hasattr(adl, "ADL2_Main_Control_Create"):
+            create = adl.ADL2_Main_Control_Create
+            create.argtypes = [CALLBACK, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+            create.restype = ctypes.c_int
+            if create(callback, 1, ctypes.byref(context)) != 0:
+                return {"percent": None, "name": "", "vendor": "amd"}
+            activity = getattr(adl, "ADL2_Overdrive6_Activity_Get", None)
+            destroy = getattr(adl, "ADL2_Main_Control_Destroy", None)
+            ctx_arg = context
+        else:
+            create = getattr(adl, "ADL_Main_Control_Create", None)
+            activity = getattr(adl, "ADL_Overdrive6_Activity_Get", None)
+            destroy = getattr(adl, "ADL_Main_Control_Destroy", None)
+            ctx_arg = None
+            if create is None:
+                return {"percent": None, "name": "", "vendor": "amd"}
+            create.argtypes = [CALLBACK, ctypes.c_int]
+            create.restype = ctypes.c_int
+            if create(callback, 1) != 0:
+                return {"percent": None, "name": "", "vendor": "amd"}
+        try:
+            if activity is None:
+                return {"percent": None, "name": "", "vendor": "amd"}
+            # явные прототипы: вызов с неправильной сигнатурой — это порча стека
+            if ctx_arg is not None:
+                activity.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                     ctypes.POINTER(ctypes.c_int),
+                                     ctypes.POINTER(ctypes.c_int)]
+            else:
+                activity.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int),
+                                     ctypes.POINTER(ctypes.c_int)]
+            activity.restype = ctypes.c_int
+            if destroy is not None:
+                destroy.argtypes = [ctypes.c_void_p] if ctx_arg is not None else []
+                destroy.restype = ctypes.c_int
+            count = ctypes.c_int(0)
+            number_of = getattr(adl, "ADL_Adapter_NumberOfAdapters_Get", None)
+            if number_of is not None:
+                number_of.argtypes = [ctypes.POINTER(ctypes.c_int)]
+                number_of.restype = ctypes.c_int
+                if number_of(ctypes.byref(count)) != 0 or count.value <= 0:
+                    return {"percent": None, "name": "", "vendor": "amd"}
+            else:
+                count.value = 1
+
+            best = 0
+            for index in range(min(count.value, 8)):
+                percent = ctypes.c_int(0)
+                level = ctypes.c_int(0)
+                if ctx_arg is not None:
+                    code = activity(ctx_arg, index, ctypes.byref(percent),
+                                    ctypes.byref(level))
+                else:
+                    code = activity(index, ctypes.byref(percent), ctypes.byref(level))
+                if code == 0:
+                    best = max(best, int(percent.value))
+            if best <= 0:
+                return {"percent": None, "name": "", "vendor": "amd"}
+            return {"percent": min(100, best), "name": "AMD Radeon", "vendor": "amd"}
+        finally:
+            if destroy is not None:
+                try:
+                    destroy(ctx_arg) if ctx_arg is not None else destroy()
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception:  # noqa: BLE001 — ADL не любит чужие контексты/версии
+        return {"percent": None, "name": "", "vendor": "amd"}
+    finally:
+        del callback  # после Destroy колбэк больше не нужен
+
+
 def _gpu_windows() -> Dict[str, Any]:
-    """Сначала PDH; nvidia-smi — только как редкий запасной вариант (30 с кэш)."""
+    """GPU на Windows: PDH → nvidia-smi → ADL, с кэшем и защитой от спама.
+
+    PDH покрывает все три вендора и не запускает процессов; nvidia-smi даёт
+    точное имя карты; ADL — путь для AMD, когда счётчики выключены политикой.
+    """
     now = time.monotonic()
     if _GPU_CACHE.get("value") and now - _GPU_CACHE.get("ts", 0.0) < 2.0:
         return dict(_GPU_CACHE["value"])
 
+    name = _gpu_windows_registry_name()
     result = _gpu_windows_pdh()
     if result.get("percent") is not None:
+        result["name"] = name
+        result["vendor"] = _gpu_vendor(name)
+        result["source"] = "pdh"
         _GPU_SOURCE[0] = "pdh"
-        result["name"] = _gpu_windows_registry_name()
         _GPU_CACHE["value"] = result
         _GPU_CACHE["ts"] = now
         return dict(result)
@@ -316,18 +533,31 @@ def _gpu_windows() -> Dict[str, Any]:
     legacy = _GPU_CACHE.get("legacy") or {"value": None, "ts": 0.0}
     if legacy["value"] and now - legacy["ts"] < 30.0:
         return dict(legacy["value"])
-    # неудачу тоже запоминаем, чтобы не спавнить nvidia-smi каждые 2 секунды
     if now - _GPU_FAIL_TS[0] < 30.0:
-        return {"percent": None, "name": _gpu_windows_registry_name()}
+        return {"percent": None, "name": name, "vendor": _gpu_vendor(name),
+                "source": "none"}
     smi = _gpu_nvidia()
     if smi.get("percent") is not None:
+        smi["vendor"] = "nvidia"
+        smi["source"] = "nvidia-smi"
         _GPU_SOURCE[0] = "nvidia-smi"
         _GPU_CACHE["legacy"] = {"value": smi, "ts": now}
         _GPU_CACHE["value"] = smi
         _GPU_CACHE["ts"] = now
         return dict(smi)
+
+    # AMD: ADL, если драйвер установлен и API ответил
+    adl = _gpu_windows_adl()
+    if adl.get("percent") is not None:
+        adl["source"] = "adl"
+        _GPU_SOURCE[0] = "adl"
+        _GPU_CACHE["legacy"] = {"value": adl, "ts": now}
+        _GPU_CACHE["value"] = adl
+        _GPU_CACHE["ts"] = now
+        return dict(adl)
+
     _GPU_FAIL_TS[0] = now
-    return {"percent": None, "name": _gpu_windows_registry_name()}
+    return {"percent": None, "name": name, "vendor": _gpu_vendor(name), "source": "none"}
 
 
 def _gpu_macos() -> Dict[str, Any]:

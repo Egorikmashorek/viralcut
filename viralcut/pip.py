@@ -201,17 +201,20 @@ def ensure_mask(size: int, radius: int = 20) -> Optional[Path]:
 
 
 def build_filters(cam: Dict[str, Any], size: int, x: int, y: int, mask: Path,
-                  main_step: str) -> str:
+                  main_step: str, src: str = "[0:v]") -> str:
     """Собирает фильтры: основной кадр + окно камеры со скруглением.
 
     main_step — готовая цепочка основной картинки, оканчивающаяся меткой
     `[_basem]`. Результат заканчивается меткой `[base]`.
+    src — метка входного видеопотока: при вырезании пауз это результат
+    trim+concat `[vsrc]`, а не исходный `[0:v]`. Координаты окна камеры при этом
+    остаются абсолютными — кадр до кропа не масштабируется.
     """
     cw, ch = int(cam["w"]), int(cam["h"])
     cx, cy = int(cam["x"]), int(cam["y"])
-    step = main_step.replace("[0:v]", "[_main]", 1)
+    step = main_step.replace(src, "[_main]", 1)
     return (
-        f"[0:v]split=2[_main][_cam];"
+        f"{src}split=2[_main][_cam];"
         f"{step};"
         f"[_cam]crop={cw}:{ch}:{cx}:{cy},scale={size}:{size}:flags=lanczos,setsar=1,format=rgba[_camr];"
         f"[1:v]format=gray,scale={size}:{size}[_mask];"

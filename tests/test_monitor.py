@@ -7,6 +7,13 @@ from unittest import mock
 
 from viralcut import system_stats as ss
 
+ENGINE = (r"\GPU Engine(pid_{pid}_luid_0x00000000_{luid}_phys_{phys}"
+          r"_eng_{eng}_engtype_{kind})\Utilization Percentage")
+
+
+def engine_path(pid=1, luid="0x0000A1B2", phys=0, eng=0, kind="3D"):
+    return ENGINE.format(pid=pid, luid=luid, phys=phys, eng=eng, kind=kind)
+
 
 class WindowsNoSpawnTest(unittest.TestCase):
     def setUp(self):
@@ -17,6 +24,7 @@ class WindowsNoSpawnTest(unittest.TestCase):
         ss._LAST_VALUE[0] = 0.0
         ss._LAST_TS[0] = 0.0
         ss._GPU_FAIL_TS[0] = 0.0
+        ss._GPU_SOURCE[0] = ""
 
     def test_snapshot_does_not_spawn_processes(self):
         spawned = []
@@ -61,6 +69,121 @@ class WindowsNoSpawnTest(unittest.TestCase):
             data = ss.gpu(force=True)
         gpu_mock.assert_called_once()
         self.assertEqual(data["percent"], 42)
+
+
+class EngineSummaryTest(unittest.TestCase):
+    """Счётчики «GPU Engine»: суммируем 3D по адаптеру, берём самый занятый."""
+
+    def test_sums_3d_per_adapter_and_ignores_other_engines(self):
+        summary = ss._summarize_engine_utilization([
+            (engine_path(pid=1, luid="0x0AAA"), 30.0),
+            (engine_path(pid=2, luid="0x0AAA"), 25.0),      # тот же адаптер
+            (engine_path(pid=1, luid="0x0AAA", eng=1, kind="VideoDecode"), 95.0),
+            (engine_path(pid=1, luid="0x0BBB"), 12.0),      # второй адаптер
+            (engine_path(pid=1, luid="0x0BBB", kind="Copy"), 88.0),
+        ])
+        self.assertEqual(summary["percent"], 55)
+        self.assertEqual(summary["adapters"], 2)
+
+    def test_caps_at_100(self):
+        summary = ss._summarize_engine_utilization([
+            (engine_path(pid=1, luid="0x0AAA"), 80.0),
+            (engine_path(pid=2, luid="0x0AAA"), 80.0),
+        ])
+        self.assertEqual(summary["percent"], 100)
+
+    def test_empty_means_no_data(self):
+        self.assertIsNone(ss._summarize_engine_utilization([])["percent"])
+        self.assertIsNone(ss._summarize_engine_utilization(
+            [(engine_path(kind="Copy"), 30.0)])["percent"])
+
+
+class VendorTest(unittest.TestCase):
+    def test_vendor_from_name(self):
+        self.assertEqual(ss._gpu_vendor("NVIDIA GeForce RTX 4070"), "nvidia")
+        self.assertEqual(ss._gpu_vendor("AMD Radeon RX 6800 XT"), "amd")
+        self.assertEqual(ss._gpu_vendor("Intel(R) UHD Graphics 620"), "intel")
+        self.assertEqual(ss._gpu_vendor("Microsoft Basic Display Adapter"), "")
+
+
+class WindowsFallbackTest(unittest.TestCase):
+    """PDH → nvidia-smi → ADL: каждый вендор получает свой источник."""
+
+    def setUp(self):
+        ss._GPU_CACHE.update({"value": None, "ts": 0.0})
+        ss._GPU_CACHE.pop("legacy", None)
+        ss._GPU_FAIL_TS[0] = 0.0
+        ss._GPU_SOURCE[0] = ""
+
+    def test_adl_used_when_pdh_and_smi_fail(self):
+        with mock.patch.object(ss, "_platform", return_value="win32"), \
+             mock.patch.object(ss, "_gpu_windows_pdh", return_value={"percent": None, "name": ""}), \
+             mock.patch.object(ss, "_gpu_nvidia", return_value={"percent": None, "name": ""}), \
+             mock.patch.object(ss, "_gpu_windows_adl",
+                               return_value={"percent": 55, "name": "AMD Radeon", "vendor": "amd"}), \
+             mock.patch.object(ss, "_gpu_windows_registry_name", return_value="AMD Radeon RX 6800"):
+            data = ss.gpu(force=True)
+        self.assertEqual(data["percent"], 55)
+        self.assertEqual(data["source"], "adl")
+        self.assertEqual(ss._GPU_SOURCE[0], "adl")
+
+    def test_nvidia_smi_before_adl(self):
+        with mock.patch.object(ss, "_platform", return_value="win32"), \
+             mock.patch.object(ss, "_gpu_windows_pdh", return_value={"percent": None, "name": ""}), \
+             mock.patch.object(ss, "_gpu_nvidia",
+                               return_value={"percent": 41, "name": "NVIDIA GeForce RTX 3060"}), \
+             mock.patch.object(ss, "_gpu_windows_adl") as adl, \
+             mock.patch.object(ss, "_gpu_windows_registry_name", return_value="NVIDIA GeForce RTX 3060"):
+            data = ss.gpu(force=True)
+        adl.assert_not_called()
+        self.assertEqual(data["percent"], 41)
+        self.assertEqual(data["vendor"], "nvidia")
+        self.assertEqual(data["source"], "nvidia-smi")
+
+    def test_pdh_yields_vendor_and_registry_name(self):
+        with mock.patch.object(ss, "_platform", return_value="win32"), \
+             mock.patch.object(ss, "_gpu_windows_pdh",
+                               return_value={"percent": 17, "name": "GPU", "adapters": 1}), \
+             mock.patch.object(ss, "_gpu_windows_registry_name",
+                               return_value="Intel(R) Iris Xe Graphics"):
+            data = ss.gpu(force=True)
+        self.assertEqual(data["percent"], 17)
+        self.assertEqual(data["vendor"], "intel")
+        self.assertEqual(data["name"], "Intel(R) Iris Xe Graphics")
+        self.assertEqual(data["source"], "pdh")
+
+    def test_adl_absent_returns_no_data_not_crash(self):
+        with mock.patch.object(ss, "_platform", return_value="win32"), \
+             mock.patch.object(ss, "_gpu_windows_pdh", return_value={"percent": None, "name": ""}), \
+             mock.patch.object(ss, "_gpu_nvidia", return_value={"percent": None, "name": ""}), \
+             mock.patch.object(ss, "_gpu_windows_adl", return_value={"percent": None, "name": "", "vendor": "amd"}), \
+             mock.patch.object(ss, "_gpu_windows_registry_name", return_value="Microsoft Basic Display Adapter"):
+            data = ss.gpu(force=True)
+        self.assertIsNone(data["percent"])
+        self.assertEqual(data["source"], "none")
+
+
+class PdhSafetyTest(unittest.TestCase):
+    """Без pdh.dll вызов не должен бросать исключение.
+
+    Тесты платформонезависимые: на Windows-раннере pdh.dll реально есть, и
+    проверка «нет Windows» там бессмысленна — подменяем саму загрузку DLL.
+    """
+
+    def test_pdh_returns_no_data_without_dll(self):
+        with mock.patch.object(ss, "_pdh", return_value=None):
+            self.assertIsNone(ss._gpu_windows_pdh().get("percent"))
+
+    def test_pdh_dll_cached_after_failure(self):
+        ss._PDH_DLL[0] = None
+        with mock.patch.object(ss.ctypes, "WinDLL", side_effect=OSError("нет pdh.dll"),
+                               create=True):
+            first = ss._pdh()
+            second = ss._pdh()
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertIs(ss._PDH_DLL[0], False)
+        ss._PDH_DLL[0] = None
 
 
 if __name__ == "__main__":

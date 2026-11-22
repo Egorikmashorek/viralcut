@@ -27,10 +27,11 @@ def _esc(path: Path) -> str:
     return p
 
 
-def _bg_chain(w: int, h: int, focus_x: float = 0.5, sharpen: bool = False) -> str:
+def _bg_chain(w: int, h: int, focus_x: float = 0.5, sharpen: bool = False,
+              src: str = "[0:v]") -> str:
     sharp = ",unsharp=5:5:0.7:5:5:0.0" if sharpen else ""
     return (
-        f"[0:v]split=2[bg][fg];"
+        f"{src}split=2[bg][fg];"
         f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
         f"gblur=sigma=26:steps=2,eq=saturation=0.95[bgb];"
         f"[fg]scale={w}:-2:flags=lanczos{sharp}[fgs];"
@@ -39,24 +40,81 @@ def _bg_chain(w: int, h: int, focus_x: float = 0.5, sharpen: bool = False) -> st
 
 
 def _crop_chain(w: int, h: int, focus_x: float = 0.5, focus_y: float = 0.45,
-                sharpen: bool = False) -> str:
+                sharpen: bool = False, src: str = "[0:v]") -> str:
     sharp = ",unsharp=5:5:0.7:5:5:0.0" if sharpen else ""
     return (
-        f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase{sharp},"
+        f"{src}scale={w}:{h}:force_original_aspect_ratio=increase{sharp},"
         f"crop={w}:{h}:(iw-{w})*{focus_x:.3f}:(ih-{h})*{focus_y:.3f}[base]"
     )
 
 
-def _auto_chain(w: int, h: int, crop_path: Dict[str, Any], sharpen: bool = False) -> str:
+def _auto_chain(w: int, h: int, crop_path: Dict[str, Any], sharpen: bool = False,
+                src: str = "[0:v]") -> str:
     """Заливка кадра с плавающим окном по лицам."""
     x_expr, y_expr = crop_expressions(crop_path)
     cw = int(crop_path["crop_w"])
     ch = int(crop_path["crop_h"])
     sharp = ",unsharp=5:5:0.7:5:5:0.0" if sharpen else ""
     return (
-        f"[0:v]crop={cw}:{ch}:x='{x_expr}':y='{y_expr}',"
+        f"{src}crop={cw}:{ch}:x='{x_expr}':y='{y_expr}',"
         f"scale={w}:{h}:flags=lanczos,setsar=1{sharp},format=yuv420p[base]"
     )
+
+
+def _cut_spans(spans: Optional[List[Dict[str, float]]], clip_start: float,
+               clip_end: float) -> List[Dict[str, float]]:
+    """Нормализует план склейки без пауз под конкретное окно клипа.
+
+    Возвращает [] если резать нечего (одна сплошная дорожка): тогда рендер идёт
+    обычным путём без trim+concat — так дешевле и без лишних швов.
+    """
+    if not spans:
+        return []
+    clean: List[List[float]] = []
+    for span in sorted(spans, key=lambda s: float(s.get("start", 0.0))):
+        start = max(float(clip_start), float(span.get("start", clip_start)))
+        end = min(float(clip_end), float(span.get("end", clip_end)))
+        if end - start < 0.05:
+            continue
+        if clean and start - clean[-1][1] < 0.03:
+            clean[-1][1] = max(clean[-1][1], end)  # слипшиеся отрезки — без шва
+        else:
+            clean.append([start, end])
+    if len(clean) < 2:
+        return []
+    covered = sum(end - start for start, end in clean)
+    if covered < (clip_end - clip_start) * 0.3:
+        # план «съел» почти весь клип — вероятно, ошибочный: не рискуем
+        return []
+    return [{"start": round(start, 3), "end": round(end, 3)} for start, end in clean]
+
+
+def _video_spans_graph(segments: List[Dict[str, float]], base: float) -> str:
+    """trim+setpts+concat: вход — исходник, выход — метка [vsrc]."""
+    parts: List[str] = []
+    labels: List[str] = []
+    for i, seg in enumerate(segments):
+        start = max(0.0, seg["start"] - base)
+        end = max(start + 0.02, seg["end"] - base)
+        parts.append(f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS[v{i}]")
+        labels.append(f"[v{i}]")
+    parts.append("".join(labels) + f"concat=n={len(segments)}:v=1:a=0[vsrc]")
+    return ";".join(parts)
+
+
+def _audio_spans_graph(segments: List[Dict[str, float]], base: float,
+                       track: int = 0) -> str:
+    """atrim+asetpts+concat для звука: выход — метка [aconc]."""
+    src = f"[0:a:{max(0, int(track))}]"
+    parts: List[str] = []
+    labels: List[str] = []
+    for i, seg in enumerate(segments):
+        start = max(0.0, seg["start"] - base)
+        end = max(start + 0.02, seg["end"] - base)
+        parts.append(f"{src}atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[a{i}]")
+        labels.append(f"[a{i}]")
+    parts.append("".join(labels) + f"concat=n={len(segments)}:v=0:a=1[aconc]")
+    return ";".join(parts)
 
 
 _HW_CACHE: Dict[str, Any] = {}
@@ -204,17 +262,29 @@ def _run_encode(cmd: List[str], duration: float,
 
 
 def _measure_loudness(source: Path, start: float, duration: float,
-                      audio_track: int = 0) -> Optional[Dict[str, Any]]:
-    """Первый проход loudnorm: измеряем громкость фрагмента."""
+                      audio_track: int = 0,
+                      segments: Optional[List[Dict[str, float]]] = None
+                      ) -> Optional[Dict[str, Any]]:
+    """Первый проход loudnorm: измеряем громкость фрагмента.
+
+    С вырезанием пауз измеряем уже склеенную дорожку (trim+concat): иначе
+    loudnorm получил бы громкость вместе с выброшенной тишиной и занизил бы
+    итоговый уровень.
+    """
     try:
-        proc = subprocess.run(
-            [ffmpeg(), "-hide_banner", "-nostats", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}",
-             "-i", str(source), "-map", f"0:a:{max(0, int(audio_track))}?", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
-             "-f", "null", "-"],
-            capture_output=True, text=True, errors="replace",
-            timeout=max(30.0, duration * 2.5),
-            **subprocess_kwargs(),
-        )
+        if segments:
+            graph = _audio_spans_graph(segments, start, audio_track) + (
+                ";[aconc]loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json[out]")
+            cmd = [ffmpeg(), "-hide_banner", "-nostats",
+                   "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source),
+                   "-filter_complex", graph, "-map", "[out]", "-f", "null", "-"]
+        else:
+            cmd = [ffmpeg(), "-hide_banner", "-nostats", "-ss", f"{start:.3f}",
+                   "-t", f"{duration:.3f}", "-i", str(source),
+                   "-map", f"0:a:{max(0, int(audio_track))}?", "-af",
+                   "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"]
+        proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
+                              timeout=max(30.0, duration * 2.5), **subprocess_kwargs())
         text = proc.stderr or ""
         start_idx = text.rfind("{")
         end_idx = text.rfind("}")
@@ -247,9 +317,24 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                 crf: int = 21, preset: str = "veryfast",
                 crop_path: Optional[Dict[str, Any]] = None,
                 pip: Optional[Dict[str, Any]] = None,
-                audio_track: int = 0) -> Dict[str, Any]:
+                audio_track: int = 0,
+                spans: Optional[List[Dict[str, float]]] = None) -> Dict[str, Any]:
+    """Рендерит вертикальный клип из окна исходника.
+
+    spans — план склейки без пауз (analyze.cut_plan): отрезки исходника в
+    абсолютных секундах. Если он задан, видео и звук режутся trim/atrim, затем
+    склеиваются concat — паузы просто исчезают из клипа, а не ускоряются.
+    """
     w, h = ASPECTS.get(aspect, ASPECTS["9:16"])
-    duration = max(0.4, clip_end - clip_start)
+    segments = _cut_spans(spans, clip_start, clip_end)
+    if segments:
+        duration = max(0.4, round(sum(seg["end"] - seg["start"] for seg in segments), 3))
+        base = segments[0]["start"]            # самый ранний отрезок — точка входа
+        input_len = max(duration, segments[-1]["end"] - base)
+    else:
+        duration = max(0.4, clip_end - clip_start)
+        base = clip_start
+        input_len = duration
     info = probe(source)
     if info["height"] >= 1000:
         crf = min(crf, 19)
@@ -276,13 +361,15 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
 
     def _build_filters(path_used: Optional[Dict[str, Any]]) -> str:
         sharp = sharpen_base
+        src = "[vsrc]" if segments else "[0:v]"
+        prefix = _video_spans_graph(segments, base) + ";" if segments else ""
         if mode == "auto" and path_used:
             sharp = float(path_used.get("crop_w", info["width"])) < w * 1.15
-            parts = [_auto_chain(w, h, path_used, sharp)]
+            parts = [_auto_chain(w, h, path_used, sharp, src)]
         elif mode == "blur" or (mode == "auto" and not path_used):
-            parts = [_bg_chain(w, h, focus_x, sharp)]
+            parts = [_bg_chain(w, h, focus_x, sharp, src)]
         else:
-            parts = [_crop_chain(w, h, focus_x, sharpen=sharp)]
+            parts = [_crop_chain(w, h, focus_x, sharpen=sharp, src=src)]
         if pip_mask is not None and parts[0].rstrip().endswith("[base]"):
             from . import pip as _pip
 
@@ -290,7 +377,7 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
             px = int(round(min(1.0, max(0.0, float(pos[0]))) * (w - pip_size)))
             py = int(round(min(1.0, max(0.0, float(pos[1]))) * (h - pip_size)))
             main_step = parts[0].rstrip()[:-len("[base]")] + "[_basem]"
-            parts = [_pip.build_filters(pip_cam, pip_size, px, py, pip_mask, main_step)]
+            parts = [_pip.build_filters(pip_cam, pip_size, px, py, pip_mask, main_step, src)]
         if ass_path is not None:
             parts.append(
                 f"[base]ass=filename='{_esc(ass_path)}':fontsdir='{_esc(custom_fonts.libass_dir())}':alpha=1,"
@@ -298,44 +385,26 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
             )
         else:
             parts.append("[base]scale=in_range=auto:out_range=tv,format=yuv420p[v]")
-        return ";".join(parts)
+        return prefix + ";".join(parts)
 
     vlabel = "[v]"
-    filter_complex = _build_filters(crop_path if mode == "auto" else None)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    cmd = [ffmpeg(), "-y", "-hide_banner", "-v", "error", "-nostats",
-           "-progress", "pipe:1",
-           "-ss", f"{clip_start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)]
+    measured = (_measure_loudness(source, base, input_len, audio_track, segments or None)
+                if info["has_audio"] else None)
 
-    if pip_cam and pip_size >= 64:
-        from . import pip as _pip
-
-        mask = _pip.ensure_mask(pip_size, int((pip or {}).get("radius", 20)))
-        if mask is not None:
-            cmd += ["-loop", "1", "-framerate", "30", "-i", str(mask)]
-    if os.environ.get("VIRALCUT_DEBUG_RENDER"):
-        print("[render] cmd:", " ".join(cmd), file=sys.stderr, flush=True)
-    cmd += ["-filter_complex", filter_complex, "-map", vlabel]
-    if info["has_audio"]:
-        measured = _measure_loudness(source, clip_start, duration)
+    def _audio_filter() -> str:
         if measured:
-            audio_filter = (
+            text = (
                 "loudnorm=I=-14:TP=-1.5:LRA=11"
                 f":measured_I={measured['input_i']}:measured_TP={measured['input_tp']}"
                 f":measured_LRA={measured['input_lra']}:measured_thresh={measured['input_thresh']}"
                 f":offset={measured['target_offset']}:linear=true"
             )
         else:
-            audio_filter = "loudnorm=I=-14:TP=-1.5:LRA=11"
+            text = "loudnorm=I=-14:TP=-1.5:LRA=11"
         fade_out = max(0.0, duration - 0.06)
-        audio_filter += f",afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out:.3f}:d=0.05"
-        cmd += ["-map", f"0:a:{max(0, int(audio_track))}?", "-af", audio_filter,
-                "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
-    else:
-        cmd += ["-an"]
-
-    measured = _measure_loudness(source, clip_start, duration, audio_track) if info["has_audio"] else None
+        return text + f",afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out:.3f}:d=0.05"
 
     def _compose(video_args: List[str], filters: str) -> List[str]:
         """Собирает команду целиком: так откат на другой энкодер — это пересборка."""
@@ -344,24 +413,22 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                  "-progress", "pipe:1",
                  # декодер и фильтры тоже ограничиваем, иначе ffmpeg забирает все ядра
                  "-threads", threads, "-filter_threads", threads,
-                 "-ss", f"{clip_start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)])
+                 "-ss", f"{base:.3f}", "-t", f"{input_len:.3f}", "-i", str(source)])
         if pip_mask is not None:
             built += ["-loop", "1", "-framerate", "30", "-i", str(pip_mask)]
-        built += ["-filter_complex", filters, "-map", vlabel]
+        graph = filters
+        audio_map = f"0:a:{max(0, int(audio_track))}?"
+        if info["has_audio"] and segments:
+            # звук склеиваем в том же filter_complex, что и видео: паузы выпадают
+            graph = (graph + ";" + _audio_spans_graph(segments, base, audio_track) + ";"
+                     + f"[aconc]{_audio_filter()}[aout]")
+            audio_map = "[aout]"
+        built += ["-filter_complex", graph, "-map", vlabel]
         if info["has_audio"]:
-            if measured:
-                audio_filter = (
-                    "loudnorm=I=-14:TP=-1.5:LRA=11"
-                    f":measured_I={measured['input_i']}:measured_TP={measured['input_tp']}"
-                    f":measured_LRA={measured['input_lra']}:measured_thresh={measured['input_thresh']}"
-                    f":offset={measured['target_offset']}:linear=true"
-                )
-            else:
-                audio_filter = "loudnorm=I=-14:TP=-1.5:LRA=11"
-            fade_out = max(0.0, duration - 0.06)
-            audio_filter += f",afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out:.3f}:d=0.05"
-            built += ["-map", f"0:a:{max(0, int(audio_track))}?", "-af", audio_filter,
-                      "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+            built += ["-map", audio_map]
+            if not segments:
+                built += ["-af", _audio_filter()]
+            built += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
         else:
             built += ["-an"]
         built += ["-threads", str(resources.ffmpeg_threads())] + video_args + [
@@ -384,6 +451,8 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
         out_path.unlink(missing_ok=True)
         filters = _build_filters(path_used if mode == "auto" else None)
         cmd = _compose(_video_args(encoder, crf, preset), filters)
+        if os.environ.get("VIRALCUT_DEBUG_RENDER"):
+            print("[render] cmd:", " ".join(cmd), file=sys.stderr, flush=True)
         code, tail, stop_reason = _run_encode(cmd, duration, on_progress if attempt == 0 else None)
         tail_text = "".join(tail)
         if stop_reason:

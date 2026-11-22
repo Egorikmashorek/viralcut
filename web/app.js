@@ -357,7 +357,7 @@ function heroHTML() {
         ${optIcon("aspect", "ico-cyan")}
         <span class="opt-label">Формат</span>
         <div class="seg" data-group="aspect">
-          ${["9:16", "1:1", "16:9"].map((a) => `<button data-val="${a}" class="${o.aspect === a ? "active" : ""}">${a}</button>`).join("")}
+          ${["9:16", "1:1", "16:9", "4:5"].map((a) => `<button data-val="${a}" class="${o.aspect === a ? "active" : ""}">${a}</button>`).join("")}
         </div>
       </div>
       <div class="opt">
@@ -657,6 +657,7 @@ async function uploadFile(file) {
   if (file.size > 4 * 1024 * 1024 * 1024) { toast("Файл больше 4 ГБ", "err"); return; }
   const form = new FormData();
   form.append("file", file);
+  form.append("options", JSON.stringify(heroOptions()));
   toast("Загружаю файл…");
   try {
     const project = await api("/api/upload", { method: "POST", body: form });
@@ -959,6 +960,9 @@ function streamHomeHTML() {
     <p class="hero-sub">Вставьте ссылку на идущий эфир (Twitch, Kick). Приложение запишет его локально и будет находить моменты каждые несколько минут — клипы появятся до конца трансляции.</p>
     <div class="url-box">
       <input id="streamInput" type="text" placeholder="https://www.twitch.tv/канал или https://kick.com/канал" autocomplete="off" spellcheck="false" />
+      <div class="seg" data-group="aspect" style="margin-top:10px">
+        ${["9:16", "1:1", "16:9", "4:5"].map((a) => `<button data-val="${a}" class="${state.opts.aspect === a ? "active" : ""}">${a}</button>`).join("")}
+      </div>
       <button class="btn-primary" id="streamStartBtn">Записать и нарезать</button>
     </div>
   </section>
@@ -1715,7 +1719,7 @@ function openEditor(clipId) {
             <div class="field">
               <label>Формат</label>
               <select id="edAspect">
-                ${["9:16", "1:1", "16:9"].map((a) => `<option value="${a}" ${(s.aspect || "9:16") === a ? "selected" : ""}>${a}</option>`).join("")}
+                ${["9:16", "1:1", "16:9", "4:5"].map((a) => `<option value="${a}" ${(s.aspect || "9:16") === a ? "selected" : ""}>${a}</option>`).join("")}
               </select>
             </div>
             <div class="field">
@@ -2084,6 +2088,100 @@ function renderSystem(data) {
   }
 }
 
+/* ---------------- Настройки ---------------- */
+
+async function chooseFolder(kind) {
+  const native = window.pywebview && window.pywebview.api;
+  const input = kind === "download" ? $("#setDownloadDir") : $("#setClipsDir");
+  if (!native || !native.choose_folder) {
+    toast("Выбор папки доступен в настольном приложении");
+    return;
+  }
+  try {
+    const res = await native.choose_folder(input ? input.value : "");
+    if (res && res.ok && res.path && input) input.value = res.path;
+  } catch (e) {
+    toast(e.message || "Не удалось выбрать папку", "err");
+  }
+}
+
+async function openSettings() {
+  let conf = { encoder: "auto", download_dir: "", clips_dir: "", ask_folder: true, hw_available: null };
+  try { conf = await api("/api/settings"); } catch (e) { console.error(e); }
+  const modes = [["auto", "Авто"], ["gpu", "Видеокарта"], ["cpu", "Процессор"]];
+  $("#modal").innerHTML = `
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-panel" style="max-width:520px">
+      <div class="modal-head">
+        <h3>Настройки</h3>
+        <button class="icon-btn" data-close>${ICONS.close}</button>
+      </div>
+      <div class="modal-body">
+        <div class="set-section">
+          <div class="set-label">Чем кодировать клипы</div>
+          <div class="set-seg" id="setEncoder">
+            ${modes.map(([k, label]) => `<button data-val="${k}" class="${conf.encoder === k ? "active" : ""}">${label}</button>`).join("")}
+          </div>
+          <div class="set-hint">
+            Видеокарта — быстрее и не грузит процессор${conf.hw_available ? ` (доступно: ${esc(conf.hw_available)})` : " (аппаратный энкодер не найден)"}.
+            Процессор — чуть выше качество на сложных сценах.
+          </div>
+        </div>
+        <div class="set-section">
+          <div class="set-label">Куда сохранять скачанные видео</div>
+          <div class="set-path">
+            <input type="text" id="setDownloadDir" placeholder="Спросить при первом сохранении" value="${esc(conf.download_dir || "")}" />
+            <button class="btn-ghost" type="button" id="setDownloadPick">Выбрать…</button>
+          </div>
+        </div>
+        <div class="set-section">
+          <div class="set-label">Куда сохранять готовые клипы</div>
+          <div class="set-path">
+            <input type="text" id="setClipsDir" placeholder="Загрузки/ViralCut" value="${esc(conf.clips_dir || "")}" />
+            <button class="btn-ghost" type="button" id="setClipsPick">Выбрать…</button>
+          </div>
+        </div>
+        <div class="set-section">
+          <label class="toggle"><input type="checkbox" id="setAskFolder" ${conf.ask_folder ? "checked" : ""}/><span class="track"></span><span>Спрашивать папку при каждом сохранении</span></label>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn-ghost" data-close>Отмена</button>
+        <button class="btn-primary" id="setSave">Сохранить</button>
+      </div>
+    </div>`;
+  $("#modal").classList.remove("hidden");
+  $("#setDownloadPick").addEventListener("click", () => chooseFolder("download"));
+  $("#setClipsPick").addEventListener("click", () => chooseFolder("clips"));
+  let encoder = conf.encoder || "auto";
+  $$("#setEncoder button").forEach((b) => b.addEventListener("click", () => {
+    encoder = b.dataset.val;
+    $$("#setEncoder button").forEach((x) => x.classList.toggle("active", x === b));
+  }));
+  $("#setSave").addEventListener("click", async () => {
+    const btn = $("#setSave");
+    btn.disabled = true;
+    try {
+      await api("/api/settings", {
+        method: "POST",
+        body: JSON.stringify({
+          encoder,
+          download_dir: $("#setDownloadDir").value.trim(),
+          clips_dir: $("#setClipsDir").value.trim(),
+          ask_folder: $("#setAskFolder").checked,
+        }),
+      });
+      closeModal();
+      toast("Настройки сохранены");
+      pollSystem();
+    } catch (e) {
+      toast(e.message, "err");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
 function bindHud() {
   const head = $("#sysToggle");
   const card = $("#sysCard");
@@ -2157,30 +2255,50 @@ function bindHud() {
 
 function pipCardHTML(detail) {
   const project = detail.project;
-  if (!project || !project.source) return "";
+  if (!project) return "";
   const conf = (project.options && project.options.pip) || {};
   const on = conf.enabled !== false;
+  const pos = conf.pos || [0.72, 0.78];
+  const corner = conf.cam_corner || "bottom-right";
+  const corners = [["top-left", "↖"], ["top-right", "↗"], ["bottom-left", "↙"], ["bottom-right", "↘"]];
+  const slots = [];
+  for (let row = 0; row < 3; row += 1) {
+    for (let col = 0; col < 3; col += 1) {
+      const x = col / 2;
+      const y = row / 2;
+      const active = Math.abs(pos[0] - x) < 0.04 && Math.abs(pos[1] - y) < 0.04;
+      slots.push(`<button class="pip-slot ${active ? "active" : ""}" data-x="${x}" data-y="${y}" type="button" aria-label="окно ${col},${row}"></button>`);
+    }
+  }
   return `
     <div class="pip-card" id="pipCard">
       <div class="pip-head">
         <div>
           <div class="pip-title">Окно стримера</div>
-          <div class="pip-sub">Перетащите рамку камеры в исходнике и окно в клипе — так и отрендерится.</div>
+          <div class="pip-sub">Главным остаётся рабочее поле, а камера стримера — отдельным окном. Выберите, где она в кадре и куда поставить окно.</div>
         </div>
         <label class="toggle"><input type="checkbox" id="pipToggle" ${on ? "checked" : ""}/><span class="track"></span></label>
       </div>
-      <div class="pip-stage">
-        <div class="pip-source">
-          <img id="pipFrame" alt="кадр исходника" />
-          <div class="pip-cam" id="pipCam"></div>
+      <div class="pip-grid">
+        <div class="pip-block">
+          <div class="pip-label">Камера в кадре</div>
+          <div class="pip-corners" id="pipCamCorner">
+            ${corners.map(([key, icon]) => `<button class="pip-corner ${corner === key ? "active" : ""}" data-corner="${key}" type="button">${icon}</button>`).join("")}
+          </div>
+          <div class="pip-hint">В каком углу исходника сидит стример</div>
         </div>
-        <div class="pip-out">
-          <div class="pip-out-bg"><img id="pipOutFrame" alt="клип" /></div>
-          <div class="pip-box" id="pipBox"></div>
+        <div class="pip-block">
+          <div class="pip-label">Окно на клипе</div>
+          <div class="pip-slots" id="pipSlots">${slots.join("")}</div>
+          <div class="pip-hint">Куда его поставить: края или по центру</div>
+        </div>
+        <div class="pip-block">
+          <div class="pip-label">Размер окна</div>
+          <input type="range" id="pipSize" min="16" max="42" value="${Math.round((conf.size || 0.28) * 100)}"/>
+          <div class="pip-hint"><span id="pipSizeVal">${Math.round((conf.size || 0.28) * 100)}%</span> ширины клипа</div>
         </div>
       </div>
       <div class="pip-controls">
-        <label>Размер окна <input type="range" id="pipSize" min="16" max="42" value="${Math.round((conf.size || 0.28) * 100)}"/></label>
         <button class="btn-primary" id="pipApply" type="button">Применить</button>
         <button class="btn-ghost" id="pipRebuild" type="button">Пересобрать с окном</button>
       </div>
@@ -2189,251 +2307,65 @@ function pipCardHTML(detail) {
 
 async function initPip(detail) {
   const card = $("#pipCard");
-  if (!card) return;
+  if (!card || !detail || !detail.project) return;
   const project = detail.project;
-  const frame = $("#pipFrame");
-  const out = $("#pipOutFrame");
-  const cam = $("#pipCam");
-  const box = $("#pipBox");
-  const src = detail.clips && detail.clips[0];
-  const t = Math.max(1, Math.min(30, (project.duration || 10) * 0.3));
-
-  try {
-    frame.src = `/api/projects/${project.id}/frame.jpg?t=${t.toFixed(1)}&width=900`;
-    if (src) out.src = `/api/clips/${src.id}/thumb.jpg`;
-  } catch (_) {}
-
-  let conf = {
-    enabled: true,
-    cam: (project.options && project.options.pip && project.options.pip.cam) || null,
-    pos: (project.options && project.options.pip && project.options.pip.pos) || [0.72, 0.78],
-    size: (project.options && project.options.pip && project.options.pip.size) || 0.28,
+  let conf = (project.options && project.options.pip) || {};
+  conf = {
+    enabled: conf.enabled !== false,
+    pos: conf.pos || [0.72, 0.78],
+    cam_corner: conf.cam_corner || "bottom-right",
+    size: conf.size || 0.28,
+    radius: conf.radius || 20,
   };
-
-  let placeTries = 0;
-  const place = () => {
-    const r = frame.getBoundingClientRect();
-    // картинка ещё не загрузилась — размеры нулевые, подождать
-    if ((!r.width || !r.height || !frame.naturalWidth) && placeTries < 25) {
-      placeTries += 1;
-      setTimeout(place, 200);
-      return;
-    }
-    if (!r.width || !r.height) return;
-    if (conf.cam && (conf.cam.y < 0 || conf.cam.x < 0 || conf.cam.w <= 0)) conf.cam = null;
-    if (!conf.cam) {
-      const side = 0.3 * r.width;
-      conf.cam = { x: r.width - side - 8, y: r.height - side - 8, w: side, h: side };
-    }
-    cam.style.left = `${conf.cam.x}px`;
-    cam.style.top = `${conf.cam.y}px`;
-    cam.style.width = `${conf.cam.w}px`;
-    cam.style.height = `${conf.cam.h}px`;
-    const o = out.getBoundingClientRect();
-    if (o.width) {
-      box.style.width = `${conf.size * o.width}px`;
-      box.style.height = `${conf.size * o.width}px`;
-      box.style.left = `${conf.pos[0] * (o.width - conf.size * o.width)}px`;
-      box.style.top = `${conf.pos[1] * (o.height - conf.size * o.width)}px`;
-    }
-  };
-  frame.addEventListener("load", place);
-  setTimeout(place, 300);
 
   async function savePip() {
-    console.log("pip save start", JSON.stringify(conf.pos), conf.cam && conf.cam.w);
-    const r = frame.getBoundingClientRect();
-    const scale = r.width ? 900 / r.width : 1;
-    const payload = {
-      enabled: $("#pipToggle") ? $("#pipToggle").checked : true,
-      cam: conf.cam ? { x: Math.round(conf.cam.x * scale), y: Math.round(conf.cam.y * scale),
-                        w: Math.round(conf.cam.w * scale), h: Math.round(conf.cam.h * scale) } : null,
-      pos: conf.pos,
-      size: conf.size,
-    };
     try {
-      await api(`/api/projects/${project.id}/pip`, { method: "POST", body: JSON.stringify(payload) });
+      await api(`/api/projects/${project.id}/pip`, {
+        method: "POST",
+        body: JSON.stringify({
+          enabled: conf.enabled,
+          pos: conf.pos,
+          cam_corner: conf.cam_corner,
+          size: conf.size,
+          radius: conf.radius,
+        }),
+      });
     } catch (e) { console.error("pip save", e); }
   }
-  const save = savePip;
 
-  const dragIt = (el, onMove) => {
-    el.addEventListener("pointerdown", (e) => {
-      const r0 = el.getBoundingClientRect();
-      const grab = { dx: e.clientX - r0.left, dy: e.clientY - r0.top };
-      const move = (ev) => {
-        // считаем от актуального прямоугольника: страница могла прокрутиться
-        const parent = el.parentElement.getBoundingClientRect();
-        const x = ev.clientX - parent.left - grab.dx;
-        const y = ev.clientY - parent.top - grab.dy;
-        onMove(Math.max(0, x), Math.max(0, y));
-      };
-      const up = () => {
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", up);
-        el.classList.remove("dragging");
-        savePip();
-      };
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", up);
-      el.classList.add("dragging");
-      e.preventDefault();
-    });
-  };
+  $("#pipToggle").checked = conf.enabled;
+  $("#pipToggle").addEventListener("change", () => { conf.enabled = $("#pipToggle").checked; savePip(); });
 
-  dragIt(cam, (x, y) => {
-    const r = frame.getBoundingClientRect();
-    const left = Math.max(0, Math.min(r.width - conf.cam.w, x));
-    const top = Math.max(0, Math.min(r.height - conf.cam.h, y));
-    conf.cam.x = left;
-    conf.cam.y = top;
-    cam.style.left = `${left}px`;
-    cam.style.top = `${top}px`;
-  });
-
-  const corners = [
-    ["tl", "Слева сверху", [0, 0]],
-    ["tr", "Справа сверху", [1, 0]],
-    ["bl", "Слева снизу", [0, 1]],
-    ["br", "Справа снизу", [1, 1]],
-  ];
-  const setCorner = (pos) => {
-    conf.pos = pos;
-    const o = out.getBoundingClientRect();
-    const side = conf.size * o.width;
-    box.style.left = `${pos[0] * (o.width - side)}px`;
-    box.style.top = `${pos[1] * (o.height - side)}px`;
-    $$(".pip-corner").forEach((b) => b.classList.toggle("active",
-      Math.abs(Number(b.dataset.x) - pos[0]) < 0.01 && Math.abs(Number(b.dataset.y) - pos[1]) < 0.01));
-  };
-  const cornerBar = document.createElement("div");
-  cornerBar.className = "pip-corners";
-  cornerBar.innerHTML = corners.map(([id, label, pos]) =>
-    `<button class="pip-corner" data-x="${pos[0]}" data-y="${pos[1]}" type="button" data-id="${id}">${label}</button>`).join("");
-  $("#pipRebuild").parentNode.insertBefore(cornerBar, $("#pipRebuild"));
-  cornerBar.addEventListener("click", (e) => {
+  $("#pipCamCorner").addEventListener("click", (e) => {
     const btn = e.target.closest(".pip-corner");
     if (!btn) return;
-    setCorner([Number(btn.dataset.x), Number(btn.dataset.y)]);
+    conf.cam_corner = btn.dataset.corner;
+    $$("#pipCamCorner .pip-corner").forEach((b) => b.classList.toggle("active", b === btn));
     savePip();
   });
-  setCorner(conf.pos);
 
-  $("#pipToggle").addEventListener("change", save);
+  $("#pipSlots").addEventListener("click", (e) => {
+    const btn = e.target.closest(".pip-slot");
+    if (!btn) return;
+    conf.pos = [Number(btn.dataset.x), Number(btn.dataset.y)];
+    $$("#pipSlots .pip-slot").forEach((b) => b.classList.toggle("active", b === btn));
+    savePip();
+  });
+
   $("#pipSize").addEventListener("input", (e) => {
     conf.size = Number(e.target.value) / 100;
-    place();
+    $("#pipSizeVal").textContent = `${e.target.value}%`;
   });
-  $("#pipSize").addEventListener("change", save);
-  $("#pipApply").addEventListener("click", async () => {
-    await savePip();
-    toast("Положение окна сохранено");
-  });
+  $("#pipSize").addEventListener("change", savePip);
+
+  $("#pipApply").addEventListener("click", async () => { await savePip(); toast("Окно сохранено"); });
   $("#pipRebuild").addEventListener("click", async () => {
-    await save();
+    await savePip();
     try {
       const res = await api(`/api/projects/${project.id}/pip/apply`, { method: "POST", body: JSON.stringify({}) });
       toast(`Пересобираю клипов: ${res.clips}`);
       poll();
     } catch (e) { toast(e.message, "err"); }
-  });
-}
-
-/* ---------------- Настройки ---------------- */
-
-async function chooseFolder(kind) {
-  const native = window.pywebview && window.pywebview.api;
-  const input = kind === "download" ? $("#setDownloadDir") : $("#setClipsDir");
-  if (!native || !native.choose_folder) {
-    toast("Выбор папки доступен в настольном приложении");
-    return;
-  }
-  try {
-    const res = await native.choose_folder(input ? input.value : "");
-    if (res && res.ok && res.path && input) input.value = res.path;
-  } catch (e) {
-    toast(e.message || "Не удалось выбрать папку", "err");
-  }
-}
-
-async function openSettings() {
-  let conf = { encoder: "auto", download_dir: "", clips_dir: "", ask_folder: true, hw_available: null };
-  try { conf = await api("/api/settings"); } catch (e) { console.error(e); }
-  const modes = [["auto", "Авто"], ["gpu", "Видеокарта"], ["cpu", "Процессор"]];
-  $("#modal").innerHTML = `
-    <div class="modal-backdrop" data-close></div>
-    <div class="modal-panel" style="max-width:520px">
-      <div class="modal-head">
-        <h3>Настройки</h3>
-        <button class="icon-btn" data-close>${ICONS.close}</button>
-      </div>
-      <div class="modal-body">
-        <div class="set-section">
-          <div class="set-label">Чем кодировать клипы</div>
-          <div class="set-seg" id="setEncoder">
-            ${modes.map(([k, label]) => `<button data-val="${k}" class="${conf.encoder === k ? "active" : ""}">${label}</button>`).join("")}
-          </div>
-          <div class="set-hint">
-            Видеокарта — быстрее и не грузит процессор${conf.hw_available ? ` (доступно: ${esc(conf.hw_available)})` : " (аппаратный энкодер не найден)"}.
-            Процессор — чуть выше качество на сложных сценах.
-          </div>
-        </div>
-
-        <div class="set-section">
-          <div class="set-label">Куда сохранять скачанные видео</div>
-          <div class="set-path">
-            <input type="text" id="setDownloadDir" placeholder="Спросить при первом сохранении" value="${esc(conf.download_dir || "")}" />
-            <button class="btn-ghost" type="button" id="setDownloadPick">Выбрать…</button>
-          </div>
-        </div>
-
-        <div class="set-section">
-          <div class="set-label">Куда сохранять готовые клипы</div>
-          <div class="set-path">
-            <input type="text" id="setClipsDir" placeholder="Загрузки/ViralCut" value="${esc(conf.clips_dir || "")}" />
-            <button class="btn-ghost" type="button" id="setClipsPick">Выбрать…</button>
-          </div>
-        </div>
-
-        <div class="set-section">
-          <label class="toggle"><input type="checkbox" id="setAskFolder" ${conf.ask_folder ? "checked" : ""}/><span class="track"></span><span>Спрашивать папку при каждом сохранении</span></label>
-        </div>
-      </div>
-      <div class="modal-foot">
-        <button class="btn-ghost" data-close>Отмена</button>
-        <button class="btn-primary" id="setSave">Сохранить</button>
-      </div>
-    </div>`;
-  $("#modal").classList.remove("hidden");
-
-  $("#setDownloadPick").addEventListener("click", () => chooseFolder("download"));
-  $("#setClipsPick").addEventListener("click", () => chooseFolder("clips"));
-  let encoder = conf.encoder || "auto";
-  $$("#setEncoder button").forEach((b) => b.addEventListener("click", () => {
-    encoder = b.dataset.val;
-    $$("#setEncoder button").forEach((x) => x.classList.toggle("active", x === b));
-  }));
-  $("#setSave").addEventListener("click", async () => {
-    const btn = $("#setSave");
-    btn.disabled = true;
-    try {
-      await api("/api/settings", {
-        method: "POST",
-        body: JSON.stringify({
-          encoder,
-          download_dir: $("#setDownloadDir").value.trim(),
-          clips_dir: $("#setClipsDir").value.trim(),
-          ask_folder: $("#setAskFolder").checked,
-        }),
-      });
-      closeModal();
-      toast("Настройки сохранены");
-      pollSystem();
-    } catch (e) {
-      toast(e.message, "err");
-    } finally {
-      btn.disabled = false;
-    }
   });
 }
 

@@ -250,6 +250,14 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
     sharpen_base = info["width"] < w * 0.75
 
     pip_cam = (pip or {}).get("cam") if pip and pip.get("enabled", True) else None
+    corner = (pip or {}).get("cam_corner")
+    if pip_cam is None and corner and pip and pip.get("enabled", True):
+        share = float((pip or {}).get("cam_share", 0.3))
+        side = max(64, int(round(min(info["width"], info["height"]) * share)))
+        margin = int(round(min(info["width"], info["height"]) * 0.02))
+        cx = margin if "left" in corner else info["width"] - side - margin
+        cy = margin if "top" in corner else info["height"] - side - margin
+        pip_cam = {"x": cx, "y": cy, "w": side, "h": side}
     pip_size = int(round(w * float((pip or {}).get("size", 0.28))))
     pip_size -= pip_size % 2
     pip_mask = None

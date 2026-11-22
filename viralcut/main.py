@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, Form, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -27,6 +27,8 @@ class ProjectIn(BaseModel):
 class PipIn(BaseModel):
     enabled: Optional[bool] = None
     cam: Optional[Dict[str, Any]] = None
+    cam_corner: Optional[str] = None
+    cam_share: Optional[float] = None
     pos: Optional[List[float]] = None
     size: Optional[float] = None
     radius: Optional[int] = None
@@ -204,6 +206,11 @@ def project_pip_set(pid: str, body: PipIn) -> Dict[str, Any]:
             current["cam"] = {k: int(body.cam[k]) for k in ("x", "y", "w", "h")}
         except (KeyError, TypeError, ValueError):
             raise HTTPException(400, "Неверные координаты камеры")
+    if body.cam_corner in ("top-left", "top-right", "bottom-left", "bottom-right"):
+        current["cam_corner"] = body.cam_corner
+        current.pop("cam", None)
+    if body.cam_share is not None:
+        current["cam_share"] = max(0.15, min(0.45, float(body.cam_share)))
     if body.pos:
         current["pos"] = [max(0.0, min(1.0, float(body.pos[0]))), max(0.0, min(1.0, float(body.pos[1])))]
     if body.size is not None:
@@ -397,13 +404,23 @@ def stream_stop(pid: str) -> Dict[str, Any]:
 
 
 @app.post("/api/upload")
-async def upload(file: UploadFile = File(...)) -> Dict[str, Any]:
+async def upload(file: UploadFile = File(...), options: Optional[str] = Form(None)) -> Dict[str, Any]:
     if not file.filename:
         raise HTTPException(400, "Файл не выбран")
     suffix = Path(file.filename).suffix.lower() or ".mp4"
     if suffix not in ALLOWED_UPLOAD_SUFFIXES:
         raise HTTPException(400, f"Формат {suffix} не поддерживается — загрузите видео или аудио")
-    project = db.create_project("local:source", pipeline.normalize_options({}),
+    # формат и прочие настройки приходят с формой: раньше они молча терялись
+    # и проект всегда создавался с настройками по умолчанию
+    chosen: Dict[str, Any] = {}
+    if options:
+        try:
+            import json as _json
+
+            chosen = _json.loads(options)
+        except ValueError:
+            chosen = {}
+    project = db.create_project("local:source", pipeline.normalize_options(chosen),
                                 title=file.filename)
     workdir = PROJECTS_DIR / project["id"]
     workdir.mkdir(parents=True, exist_ok=True)

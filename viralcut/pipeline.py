@@ -233,15 +233,16 @@ def pip_options(opts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         cy = int(cam.get("y") or 0)
     except (TypeError, ValueError):
         return None
-    if cw < 32 or ch < 32:
-        return None
     pos = conf.get("pos") or [0.72, 0.78]
-    return {
-        "cam": {"x": cx, "y": cy, "w": cw, "h": ch},
-        "pos": [float(pos[0]), float(pos[1])],
-        "size": float(conf.get("size") or 0.28),
+    result = {
+        "cam": {"x": cx, "y": cy, "w": cw, "h": ch} if cw >= 32 and ch >= 32 else None,
+        "cam_corner": conf.get("cam_corner"),
+        "cam_share": float(conf.get("cam_share") or 0.3),
         "radius": int(conf.get("radius") or 20),
+        "size": float(conf.get("size") or 0.28),
+        "pos": [float(pos[0]), float(pos[1])],
     }
+    return result
 
 
 def _clip_settings(opts: Dict[str, Any]) -> Dict[str, Any]:
@@ -704,7 +705,7 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
     else:
         from . import live
         # клип из прямого эфира: берём фрагмент из записанных сегментов
-        live._render_live_clip(workdir, updated, 0.0, settings)
+        live._render_live_clip(workdir, updated, 0.0, settings, project.get("options") or {})
     return db.get_clip(clip_id) or updated
 
 

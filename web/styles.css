@@ -1701,3 +1701,21 @@ input[type="range"]::-webkit-slider-thumb {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
 }
+
+/* Подпись под опцией на главной («тишина и эээ убираются склейкой») */
+.opt-hint { font-size: 11px; line-height: 1.35; color: var(--muted-2); }
+
+/* Диагностика журнала: моноширинный блок в настройках */
+.diag-out {
+  margin: 10px 0 0;
+  padding: 12px 14px;
+  max-height: 260px;
+  overflow: auto;
+  border-radius: 12px;
+  border: 1px solid var(--separator);
+  background: var(--grouped-2);
+  color: var(--muted-2, #a6a6b0);
+  font: 11px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

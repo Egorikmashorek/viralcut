@@ -446,3 +446,62 @@ def crop_expressions(path: Dict[str, Any]) -> Tuple[str, str]:
     x_expr = _piecewise(times, path["x"], max_x, "t")
     y_expr = _piecewise(times, path["y"], max_y, "t")
     return x_expr, y_expr
+
+
+def remap_crop_path(path: Optional[Dict[str, Any]], segments: List[Dict[str, float]],
+                    clip_start: float) -> Optional[Dict[str, Any]]:
+    """Пересчитывает кривую кадрирования на время склеенного клипа.
+
+    `times` в кривой — секунды от начала окна клипа, а план склейки задан
+    абсолютными временами исходника. Точки, попавшие в вырезанные паузы,
+    выбрасываются, остальные сдвигаются на новое место. Без этого окно
+    кадрирования «опаздывало» бы ровно на длину вырезанных пауз.
+    """
+    if not path or not segments:
+        return path
+    times = [float(t) for t in path.get("times") or []]
+    xs = list(path.get("x") or [])
+    ys = list(path.get("y") or [])
+    if not times or len(xs) != len(times) or len(ys) != len(times):
+        return None
+
+    offsets: List[float] = []
+    total = 0.0
+    for seg in segments:
+        offsets.append(total)
+        total += seg["end"] - seg["start"]
+
+    out_t: List[float] = []
+    out_x: List[float] = []
+    out_y: List[float] = []
+    for t, x, y in zip(times, xs, ys):
+        absolute = clip_start + t
+        for seg, offset in zip(segments, offsets):
+            if seg["start"] - 1e-6 <= absolute <= seg["end"] + 1e-6:
+                new_t = offset + max(0.0, absolute - seg["start"])
+                if out_t and new_t - out_t[-1] < 1e-3:
+                    # две точки на одном месте: оставляем последнюю (она свежее)
+                    out_x[-1], out_y[-1] = x, y
+                    out_t[-1] = new_t
+                else:
+                    out_t.append(new_t)
+                    out_x.append(x)
+                    out_y.append(y)
+                break
+
+    if len(out_t) < 2:
+        return None
+    if out_t[0] > 1e-3:
+        out_t.insert(0, 0.0)
+        out_x.insert(0, out_x[0])
+        out_y.insert(0, out_y[0])
+    if total - out_t[-1] > 0.05:
+        out_t.append(total)
+        out_x.append(out_x[-1])
+        out_y.append(out_y[-1])
+
+    out = dict(path)
+    out["times"] = [round(v, 3) for v in out_t]
+    out["x"] = list(out_x)
+    out["y"] = list(out_y)
+    return out

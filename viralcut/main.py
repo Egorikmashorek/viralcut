@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -84,6 +85,7 @@ class ClipEdit(BaseModel):
     sub_position: Optional[str] = None
     sub_offset: Optional[int] = None
     sub_speed: Optional[str] = None
+    cut_pauses: Optional[bool] = None
 
 
 # Лимиты загрузки: интерфейс проверяет 4 ГБ, но сервер обязан проверять сам.
@@ -174,14 +176,31 @@ def _clean_clip_edit(body: ClipEdit) -> Dict[str, Any]:
 
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
+    """Готовность приложения: эндпоинт дёргает и интерфейс, и smoke-тесты.
+
+    Пути к ffmpeg/ffprobe и версия нужны, чтобы по одному ответу понять, что
+    за сборка запущена и чем она собрана (важно для тестовых Windows-сборок).
+    """
+    from . import config as app_config
+
     ok_ffmpeg = True
+    binary = ""
     try:
-        ffmpeg()
+        binary = ffmpeg()
     except Exception:
         ok_ffmpeg = False
+    try:
+        probe = app_config.ffprobe() or ""
+    except Exception:  # noqa: BLE001
+        probe = ""
     return {
         "ok": ok_ffmpeg,
+        "version": __version__,
+        "platform": sys.platform,
+        "frozen": bool(getattr(sys, "frozen", False)),
         "ffmpeg": ok_ffmpeg,
+        "ffmpeg_path": binary,
+        "ffprobe": probe,
         "whisper": transcribe.model_available(),
         "model": transcribe.model_cached(),
         # диагностика рендера: только из кэша, чтобы не тормозить интерфейс
@@ -320,6 +339,20 @@ def system_state() -> Dict[str, Any]:
     data = system_stats.snapshot({"hw": render.hw_encoder(), "limits": resources.summary()})
     data["job"] = system_stats.active_job(db.list_projects(5))
     return data
+
+
+@app.get("/api/diagnostics")
+def diagnostics_log(tail: int = 40) -> Dict[str, Any]:
+    """Разбор app.log: падение, последний этап, ошибки — для окна «Диагностика»."""
+    from . import diagnostics
+
+    system: Dict[str, Any] = {}
+    try:
+        system = health()
+    except Exception:  # noqa: BLE001 — разбор лога важнее телеметрии
+        system = {}
+    return diagnostics.report(data_dir=DATA_DIR, tail_lines=max(1, min(400, int(tail))),
+                              system=system)
 
 
 @app.get("/api/update")
@@ -583,6 +616,8 @@ def project_retry(pid: str, body: RetryIn = RetryIn()) -> Dict[str, Any]:
     if jobs.is_running(pid):
         # текущая обработка ещё останавливается — поставим повтор в очередь
         pipeline.request_cancel(pid)
+    print(f"[api] Пересборка проекта {pid} (force_hd={body.force_hd}, "
+          f"prepare_only={body.prepare_only})", file=sys.stderr, flush=True)
     options = dict(project.get("options") or {})
     options["force_hd"] = bool(body.force_hd)
     if body.force_hd:

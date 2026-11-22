@@ -39,6 +39,7 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     "audio_track": 0,
     "sub_free": None,
     "force_hd": False,
+    "cut_pauses": False,
 }
 
 
@@ -48,6 +49,7 @@ def normalize_options(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         for key, value in raw.items():
             if value is not None:
                 opts[key] = value
+    opts["cut_pauses"] = bool(opts.get("cut_pauses"))
     try:
         opts["count"] = int(opts["count"])
     except Exception:
@@ -116,7 +118,16 @@ def _check_cancel(pid: str) -> None:
         raise Cancelled()
 
 
+# Последний записанный в лог этап: журнал app.log должен показывать, на чём
+# именно приложение упало, но без сотни повторяющихся строк прогресса.
+_STAGE_LOG: Dict[str, str] = {}
+
+
 def _update(pid: str, **fields: Any) -> None:
+    stage = fields.get("stage")
+    if isinstance(stage, str) and stage and _STAGE_LOG.get(pid) != stage:
+        _STAGE_LOG[pid] = stage
+        print(f"[stage] {stage}", file=sys.stderr, flush=True)
     db.update_project(pid, **fields)
 
 
@@ -260,7 +271,7 @@ def _clip_settings(opts: Dict[str, Any]) -> Dict[str, Any]:
         "show_hook": opts["show_hook"], "focus_x": 0.5, "sub_size": opts["sub_size"],
         "sub_font": opts["sub_font"], "sub_position": opts["sub_position"],
         "sub_offset": opts["sub_offset"], "sub_free": opts.get("sub_free"), "sub_speed": opts["sub_speed"],
-        "segments": bool(opts.get("segments")),
+        "segments": bool(opts.get("segments")), "cut_pauses": bool(opts.get("cut_pauses")),
     }
 
 
@@ -523,7 +534,8 @@ def process_project(pid: str) -> None:
             "accent": opts["accent"], "uppercase": opts["uppercase"],
             "show_hook": opts["show_hook"], "focus_x": 0.5, "sub_size": opts["sub_size"],
             "sub_font": opts["sub_font"], "sub_position": opts["sub_position"],
-            "sub_offset": opts["sub_offset"], "sub_free": opts.get("sub_free"), "sub_speed": opts["sub_speed"],
+            "sub_offset": opts["sub_offset"], "sub_free": opts.get("sub_free"),
+            "sub_speed": opts["sub_speed"], "cut_pauses": bool(opts.get("cut_pauses")),
         }
         _check_cancel(pid)
         total = len(found)
@@ -618,6 +630,24 @@ def run_project(pid: str) -> None:
     process_project(pid)
 
 
+def _pause_spans(source: Path, start: float, end: float) -> List[Dict[str, float]]:
+    """План склейки окна без пауз; пустой список — резать нечего.
+
+    Порог паузы 0.45 с и запас 0.12 с по краям: дыхание и микропаузы внутри
+    фразы остаются, а «эээ…» и молчание между мыслями исчезают.
+    """
+    try:
+        curve, mean_db = analyze.cached_energy_curve(source)
+        if not curve:
+            return []
+        gaps = analyze.silence_gaps(curve, mean_db, start, end)
+        spans = analyze.cut_plan(start, end, gaps)
+        return spans if len(spans) > 1 else []
+    except Exception as exc:  # noqa: BLE001 — без плана рендерим как обычно
+        print(f"[render] паузы не вырезаны: {exc}", file=sys.stderr, flush=True)
+        return []
+
+
 def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
                 settings: Dict[str, Any], on_progress: Optional[Callable[[float], None]] = None,
                 opts: Optional[Dict[str, Any]] = None) -> None:
@@ -626,10 +656,22 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
     out_dir.mkdir(parents=True, exist_ok=True)
     ass_dir.mkdir(parents=True, exist_ok=True)
 
+    # «Вырезать паузы»: считаем план склейки до рендера, а слова и кривую
+    # кадрирования пересчитываем на новое время — иначе субтитры и кроп
+    # отставали бы на длину вырезанного.
+    spans: List[Dict[str, float]] = []
+    words = list(clip["words"] or [])
+    if settings.get("cut_pauses") and not settings.get("segments"):
+        spans = _pause_spans(source, float(clip["start"]), float(clip["end"]))
+        if spans:
+            words = analyze.remap_words(words, spans)
+
     ass_path = None
-    if settings.get("subtitles", True) and clip["words"]:
+    if settings.get("subtitles", True) and words:
         text = subtitles.build_ass(
-            clip["words"], clip["start"], clip["end"],
+            words, 0.0 if spans else clip["start"],
+            round(spans[-1]["output"] + (spans[-1]["end"] - spans[-1]["start"]), 3)
+            if spans else clip["end"],
             hook=clip.get("hook") or clip.get("title") or "",
             accent=settings.get("accent", "yellow"),
             uppercase=settings.get("uppercase", True),
@@ -650,6 +692,8 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
         try:
             crop_path = reframe.build_crop_path(
                 source, clip["start"], clip["end"], aspect=settings.get("aspect", "9:16"))
+            if crop_path and spans:
+                crop_path = reframe.remap_crop_path(crop_path, spans, float(clip["start"]))
         except Exception:
             crop_path = None
         # если лиц почти нет (скринкаст, слайды) — заполняем кадр по центру,
@@ -663,6 +707,7 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
         focus_x=float(settings.get("focus_x", 0.5)), on_progress=on_progress,
         crop_path=crop_path, pip=pip_options(opts or {}),
         audio_track=int((opts or {}).get("audio_track") or 0),
+        spans=spans or None,
     )
     thumb_path = workdir / "thumbs" / f"{clip['id']}.jpg"
     render.make_thumb(out_path, thumb_path, at=min(1.2, max(0.2, (clip["end"] - clip["start"]) * 0.15)))
@@ -687,7 +732,7 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
     if settings.get("segments"):
         raise RuntimeError("Клип собран в экономном режиме из фрагмента. Шаблон меняется до запуска нарезки.")
     for key in ("aspect", "mode", "subtitles", "accent", "uppercase", "show_hook", "focus_x",
-                "sub_size", "sub_font", "sub_position", "sub_offset", "sub_speed"):
+                "sub_size", "sub_font", "sub_position", "sub_offset", "sub_speed", "cut_pauses"):
         if key in payload and payload[key] is not None:
             settings[key] = payload[key]
     start = float(payload.get("start", clip["start"]))
@@ -769,7 +814,7 @@ def trim_silence(source: Path, start: float, end: float,
                  max_trim: float = 3.0) -> Tuple[float, float]:
     """Подтягивает края клипа к речи, чтобы не брать пустые секунды."""
     try:
-        curve, mean_db = analyze.energy_curve(source)
+        curve, mean_db = analyze.cached_energy_curve(source)
         if not curve:
             return start, end
         new_start = analyze._nearest_quiet(curve, mean_db, start + 0.05, 0.25, window=0.35)

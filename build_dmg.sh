@@ -18,6 +18,8 @@ STAGE="build/dmg"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/"
+# Инструкция для тестера: Gatekeeper, что проверить, куда смотреть в логе
+cp docs/MACOS-TEST.md "$STAGE/ЧИТАЙ-МЕНЯ.txt"
 ln -s /Applications "$STAGE/Applications"
 
 if hdiutil create -volname "ViralCut" -srcfolder "$STAGE" -ov -format UDZO \

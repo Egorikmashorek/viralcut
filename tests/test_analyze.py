@@ -265,3 +265,37 @@ class SilenceGapsTest(unittest.TestCase):
         self.assertEqual(len(gaps), 2)
         self.assertAlmostEqual(gaps[0]["start"], 2.0, places=1)
         self.assertAlmostEqual(gaps[0]["length"], 2.0, places=1)
+
+
+class CutPlanTest(unittest.TestCase):
+    def test_removes_pause(self):
+        from viralcut import analyze
+
+        gaps = [{"start": 8.0, "end": 10.0, "length": 2.0}]
+        spans = analyze.cut_plan(0.0, 20.0, gaps)
+        self.assertEqual(len(spans), 2)
+        self.assertAlmostEqual(spans[0]["end"], 8.12, places=2)
+        self.assertAlmostEqual(spans[1]["start"], 9.88, places=2)
+        self.assertAlmostEqual(spans[1]["output"], 8.12, places=2)
+        total = sum(s["end"] - s["start"] for s in spans)
+        self.assertAlmostEqual(total, 18.24, places=2)
+
+    def test_words_shift_to_output_time(self):
+        from viralcut import analyze
+
+        spans = analyze.cut_plan(0.0, 20.0, [{"start": 8.0, "end": 10.0, "length": 2.0}])
+        words = [{"text": "до", "start": 2.0, "end": 2.5},
+                 {"text": "в паузе", "start": 9.0, "end": 9.4},
+                 {"text": "после", "start": 14.0, "end": 14.5}]
+        moved = analyze.remap_words(words, spans)
+        self.assertEqual([w["text"] for w in moved], ["до", "после"])
+        self.assertAlmostEqual(moved[0]["start"], 2.0, places=2)
+        self.assertAlmostEqual(moved[1]["start"], 12.24, places=2)
+        self.assertAlmostEqual(moved[1]["end"], 12.74, places=2)
+
+    def test_empty_gaps_keeps_window(self):
+        from viralcut import analyze
+
+        spans = analyze.cut_plan(5.0, 25.0, [])
+        self.assertEqual(len(spans), 1)
+        self.assertAlmostEqual(spans[0]["end"] - spans[0]["start"], 20.0, places=2)

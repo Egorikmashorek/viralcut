@@ -660,3 +660,45 @@ def silence_gaps(curve: List[float], mean_db: float, start: float, end: float,
             gaps.append({"start": round(run_start, 2), "end": round(tail, 2),
                          "length": round(tail - run_start, 2)})
     return gaps
+
+
+def cut_plan(start: float, end: float, gaps: List[Dict[str, float]],
+             padding: float = 0.12, min_keep: float = 0.35) -> List[Dict[str, float]]:
+    """План склейки окна без пауз.
+
+    Каждый отрезок знает своё новое время на выходе (`output`), поэтому
+    пересчёт слов считается без повторного сложения.
+    """
+    spans: List[Dict[str, float]] = []
+    cursor = start
+    out = 0.0
+    for gap in sorted(gaps, key=lambda g: float(g["start"])):
+        cut_from = max(start, float(gap["start"]) + padding)
+        cut_to = min(end, float(gap["end"]) - padding)
+        if cut_to <= cut_from or cut_from <= cursor:
+            cursor = max(cursor, cut_to)
+            continue
+        if cut_from - cursor >= min_keep:
+            spans.append({"start": round(cursor, 3), "end": round(cut_from, 3),
+                          "output": round(out, 3)})
+            out += cut_from - cursor
+        cursor = max(cursor, cut_to)
+    if end - cursor >= min_keep:
+        spans.append({"start": round(cursor, 3), "end": round(end, 3), "output": round(out, 3)})
+    return spans or [{"start": round(start, 3), "end": round(end, 3), "output": 0.0}]
+
+
+def remap_words(words: List[Dict[str, Any]], spans: List[Dict[str, float]]
+                ) -> List[Dict[str, Any]]:
+    """Слова под склейку: выбросить попавшие в паузы, сдвинуть на новое время."""
+    out: List[Dict[str, Any]] = []
+    for span in spans:
+        shift = float(span["output"]) - float(span["start"])
+        for word in words:
+            w_start, w_end = float(word["start"]), float(word["end"])
+            if w_end <= span["start"] or w_start >= span["end"]:
+                continue
+            out.append({**word,
+                        "start": round(max(0.0, w_start - span["start"]) + span["output"], 3),
+                        "end": round(max(0.0, w_end - span["start"]) + span["output"], 3)})
+    return out

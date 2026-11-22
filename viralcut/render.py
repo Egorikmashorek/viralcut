@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import ffmpeg
-from . import custom_fonts
+from . import custom_fonts, resources
 from . import reframe as _reframe
 from .reframe import crop_expressions
 from .utils import MediaError, probe, run, subprocess_kwargs
@@ -65,10 +65,11 @@ _HW_CACHE: Dict[str, Any] = {}
 def _hw_args(encoder: str, crf: int) -> List[str]:
     """Аргументы аппаратного энкодера (у каждого свои понятия качества)."""
     if encoder == "h264_videotoolbox":
-        return ["-c:v", encoder, "-b:v", "9M", "-maxrate", "14M", "-bufsize", "14M",
-                "-profile:v", "high", "-pix_fmt", "yuv420p"]
+        # q=75 по замеру даёт SSIM 0.9905 против 0.9894 у libx264 CRF19
+        return ["-c:v", encoder, "-q:v", "75", "-profile:v", "high",
+                "-pix_fmt", "yuv420p"]
     if encoder == "h264_nvenc":
-        return ["-c:v", encoder, "-preset", "p5", "-rc", "vbr", "-cq", str(crf),
+        return ["-c:v", encoder, "-preset", "p5", "-rc", "vbr", "-cq", str(max(19, crf)),
                 "-b:v", "0", "-pix_fmt", "yuv420p"]
     if encoder == "h264_qsv":
         return ["-c:v", encoder, "-global_quality", str(crf), "-pix_fmt", "nv12"]
@@ -107,9 +108,9 @@ def hw_encoder() -> Optional[str]:
     """
     if "value" in _HW_CACHE:
         return _HW_CACHE["value"]
-    # По умолчанию CPU: замер показал, что videotoolbox не быстрее (фильтры
-    # съедают всё), но даёт фиксированный битрейт и хуже держит сложные сцены.
-    if os.environ.get("VIRALCUT_HW_ENCODE", "0").strip().lower() not in ("1", "auto", "true", "yes"):
+    # GPU по умолчанию: аппаратный энкодер разгружает процессор, а качество
+    # выставлено по замеру (q=75 ≈ libx264 CRF19). Отключается VIRALCUT_HW_ENCODE=0.
+    if os.environ.get("VIRALCUT_HW_ENCODE", "auto").strip().lower() in ("0", "false", "no", "off"):
         _HW_CACHE["value"] = None
         return None
     preferred = {"darwin": ["h264_videotoolbox"], "win32": ["h264_nvenc", "h264_qsv"],
@@ -279,9 +280,12 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
 
     def _compose(video_args: List[str], filters: str) -> List[str]:
         """Собирает команду целиком: так откат на другой энкодер — это пересборка."""
-        built = [ffmpeg(), "-y", "-hide_banner", "-v", "error", "-nostats",
+        threads = str(resources.ffmpeg_threads())
+        built = resources.wrap_nice([ffmpeg(), "-y", "-hide_banner", "-v", "error", "-nostats",
                  "-progress", "pipe:1",
-                 "-ss", f"{clip_start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)]
+                 # декодер и фильтры тоже ограничиваем, иначе ffmpeg забирает все ядра
+                 "-threads", threads, "-filter_threads", threads,
+                 "-ss", f"{clip_start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)])
         built += ["-filter_complex", filters, "-map", vlabel]
         if info["has_audio"]:
             if measured:
@@ -299,7 +303,8 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                       "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
         else:
             built += ["-an"]
-        built += video_args + ["-r", "30", "-movflags", "+faststart", "-shortest", str(out_path)]
+        built += ["-threads", str(resources.ffmpeg_threads())] + video_args + [
+            "-r", "30", "-movflags", "+faststart", "-shortest", str(out_path)]
         return built
 
     hw = hw_encoder()

@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import custom_fonts, db, jobs, pipeline, render, transcribe
+from . import custom_fonts, db, jobs, pipeline, render, resources, transcribe
 from ._version import __version__
 from .config import ASSETS_DIR, DATA_DIR, PROJECTS_DIR, WEB_DIR, ffmpeg
 
@@ -155,6 +155,7 @@ def health() -> Dict[str, Any]:
         "model": transcribe.model_cached(),
         # диагностика рендера: железо или CPU (у части машин hw-энкодер не работает)
         "hw": render.hw_encoder(),
+        "limits": resources.summary(),
         "projects": db.count_projects(),
     }
 

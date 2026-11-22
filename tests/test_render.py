@@ -87,3 +87,43 @@ class LongClipRenderTest(unittest.TestCase):
         render.render_clip(src, 0.0, 36.0, out, aspect="9:16", mode="auto", crop_path=crop)
         self.assertTrue(out.exists())
         self.assertGreater(out.stat().st_size, 100_000)
+
+
+class ResourcesTest(unittest.TestCase):
+    """Лимиты ресурсов: рендер не должен забирать все ядра."""
+
+    def test_limits_are_sane(self):
+        from viralcut import resources
+
+        info = resources.summary()
+        self.assertGreaterEqual(info["cpu"], 1)
+        self.assertGreaterEqual(info["render_workers"], 1)
+        self.assertLessEqual(info["render_workers"], 6)
+        self.assertGreaterEqual(info["ffmpeg_threads"], 1)
+        # потоки одного ffmpeg × число рендеров не должны превышать машину+1
+        self.assertLessEqual(info["ffmpeg_threads"] * info["render_workers"],
+                             info["cpu"] + 1)
+
+    def test_env_overrides(self):
+        import os
+        from viralcut import resources
+
+        os.environ["VIRALCUT_RENDER_WORKERS"] = "1"
+        os.environ["VIRALCUT_FFMPEG_THREADS"] = "2"
+        try:
+            self.assertEqual(resources.render_workers(), 1)
+            self.assertEqual(resources.ffmpeg_threads(), 2)
+        finally:
+            os.environ.pop("VIRALCUT_RENDER_WORKERS", None)
+            os.environ.pop("VIRALCUT_FFMPEG_THREADS", None)
+
+    def test_nice_wrapper(self):
+        import sys
+        from viralcut import resources
+
+        cmd = ["ffmpeg", "-version"]
+        wrapped = resources.wrap_nice(cmd)
+        if sys.platform == "win32":
+            self.assertEqual(wrapped, cmd)
+        else:
+            self.assertIn("nice", wrapped[0])

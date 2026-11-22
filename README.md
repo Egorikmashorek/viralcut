@@ -38,11 +38,11 @@
 
 | Платформа | Файл | Что внутри |
 |---|---|---|
-| **macOS 11+** (Apple Silicon) | [`ViralCut-1.4.4-macOS-arm64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.4.4-macOS-arm64.zip) · ~619 МБ | Модель Whisper, ffmpeg, 24 шрифта, PO-провайдер |
-| **macOS, образ DMG** | [`ViralCut-1.4.4.dmg`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.4.4.dmg) · ~636 МБ | То же, перетащить в «Программы» одним движением |
-| **Windows 10/11** (x64) | [`ViralCut-1.4.4-windows-x64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.4.4-windows-x64.zip) · ~638 МБ | Модель Whisper, ffmpeg, шрифты, WebView2-зависимости |
+| **macOS 11+** (Apple Silicon) | [`ViralCut-1.5.0-macOS-arm64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.0-macOS-arm64.zip) · ~619 МБ | Модель Whisper, ffmpeg, 24 шрифта, PO-провайдер |
+| **macOS, образ DMG** | [`ViralCut-1.5.0.dmg`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.0.dmg) · ~636 МБ | То же, перетащить в «Программы» одним движением |
+| **Windows 10/11** (x64) | [`ViralCut-1.5.0-windows-x64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.0-windows-x64.zip) · ~638 МБ | Модель Whisper, ffmpeg, шрифты, WebView2-зависимости |
 
-> Актуальный релиз **1.4.4**. Windows-сборку собирает
+> Актуальный релиз **1.5.0**. Windows-сборку собирает
 > GitHub Actions и прикладывает к релизу; macOS-архив собран и подписан ad-hoc.
 
 ## Почему ViralCut
@@ -155,11 +155,25 @@ Telegram появляется карточка «Доступна версия X
 проверяется пробным кадром при старте: если железо не поддерживает
 videotoolbox/nvenc/qsv, рендер молча идёт на libx264.
 
+### Ограничение ресурсов
+
+Рендер не забирает весь компьютер:
+
+| Ограничение | По умолчанию | Переменная |
+|---|---|---|
+| Параллельных рендеров | 2 (на 8 ядрах) | `VIRALCUT_RENDER_WORKERS` |
+| Потоков на один ffmpeg | 3 | `VIRALCUT_FFMPEG_THREADS` |
+| Приоритет процессов | `nice 10` / BELOW_NORMAL | `VIRALCUT_NICE`, `VIRALCUT_LOW_PRIORITY=0` |
+| Потоков распознавания | половина ядер | `VIRALCUT_WHISPER_THREADS` |
+| Энкодер | GPU (videotoolbox / nvenc / qsv) | `VIRALCUT_HW_ENCODE=0` — вернуть CPU |
+
+Текущие значения видны в `/api/health` в полях `limits` и `hw`.
+
 ## Установка
 
 ### Windows 10/11
 
-Скачайте [`ViralCut-1.4.4-windows-x64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.4.4-windows-x64.zip), распакуйте и запустите `ViralCut.exe`.
+Скачайте [`ViralCut-1.5.0-windows-x64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.0-windows-x64.zip), распакуйте и запустите `ViralCut.exe`.
 Если Python нет и вы запускаете из исходников — используйте `install_windows.bat`
 (поставит Python 3.12 и WebView2 через winget).
 Подробнее: [docs/WINDOWS.md](docs/WINDOWS.md).
@@ -168,7 +182,7 @@ videotoolbox/nvenc/qsv, рендер молча идёт на libx264.
 
 #### Готовое приложение
 
-Скачайте [`ViralCut-1.4.4-macOS-arm64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.4.4-macOS-arm64.zip) из раздела **Releases** (≈620 МБ; внутри модели и все зависимости, после установки ничего не докачивается).
+Скачайте [`ViralCut-1.5.0-macOS-arm64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.0-macOS-arm64.zip) из раздела **Releases** (≈620 МБ; внутри модели и все зависимости, после установки ничего не докачивается).
 
 1. Распакуйте и перетащите `ViralCut.app` в «Программы».
 2. Запустите — откроется своё окно, браузер не нужен.
@@ -220,7 +234,7 @@ videotoolbox/nvenc/qsv, рендер молча идёт на libx264.
 | Платформа | Команда | Результат |
 |---|---|---|
 | **macOS** | `./build_app.sh` | `dist/ViralCut.app` |
-| **Windows 10/11** | `powershell -ExecutionPolicy Bypass -File build_windows.ps1` | `release\ViralCut-1.4.4-windows-x64.zip` |
+| **Windows 10/11** | `powershell -ExecutionPolicy Bypass -File build_windows.ps1` | `release\ViralCut-1.5.0-windows-x64.zip` |
 | **Любая ОС** | `./run.sh` | сервер на `http://127.0.0.1:8765` |
 
 Сборка воспроизводится в **GitHub Actions** ([workflow](.github/workflows/build.yml)):
@@ -229,8 +243,8 @@ ZIP автоматически прикрепляется к GitHub Release. mac
 собирается локально (`build_app.sh`) и загружается в релиз.
 
 ```bash
-git tag v1.4.4
-git push origin v1.4.4
+git tag v1.5.0
+git push origin v1.5.0
 ```
 
 ## Как это работает

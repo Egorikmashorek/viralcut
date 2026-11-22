@@ -16,7 +16,13 @@ NO_WINDOW = 0x08000000 if sys.platform.startswith("win") else 0
 
 
 def subprocess_kwargs() -> Dict[str, Any]:
-    return {"creationflags": NO_WINDOW} if NO_WINDOW else {}
+    """Флаги запуска дочерних процессов (без окна на Windows + низкий приоритет)."""
+    from . import resources
+
+    kwargs = resources.subprocess_kwargs()
+    if NO_WINDOW and "creationflags" not in kwargs:
+        kwargs["creationflags"] = NO_WINDOW
+    return kwargs
 
 
 class MediaError(Exception):
@@ -24,8 +30,10 @@ class MediaError(Exception):
 
 
 def run(cmd: List[str], timeout: Optional[int] = None) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                          errors="replace", **subprocess_kwargs())
+    from . import resources
+
+    return subprocess.run(resources.wrap_nice(cmd), capture_output=True, text=True,
+                          timeout=timeout, errors="replace", **subprocess_kwargs())
 
 
 _TIME_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")

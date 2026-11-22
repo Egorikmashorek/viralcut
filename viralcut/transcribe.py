@@ -116,11 +116,15 @@ def _get_model(long_audio: bool = False):
         model = None
         for device, compute in candidates:
             try:
+                from . import resources
+
                 model = WhisperModel(
                     model_ref,
                     device=device,
                     compute_type=compute,
                     download_root=str(MODELS_DIR),
+                    cpu_threads=resources.whisper_threads(),
+                    num_workers=1,
                 )
                 model._vc_device = device  # type: ignore[attr-defined]
                 break

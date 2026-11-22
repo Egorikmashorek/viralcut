@@ -66,6 +66,7 @@ class StreamIn(BaseModel):
 
 
 class ClipEdit(BaseModel):
+    sub_free: Optional[List[float]] = None
     text: Optional[str] = None
     start: Optional[float] = None
     end: Optional[float] = None
@@ -138,6 +139,12 @@ def _clean_clip_edit(body: ClipEdit) -> Dict[str, Any]:
         raise HTTPException(400, "Неизвестный режим кадрирования")
     if "accent" in data and data["accent"] not in subtitles.ACCENTS:
         raise HTTPException(400, "Неизвестный цвет акцента")
+    if data.get("sub_free"):
+        try:
+            x, y = (float(v) for v in data["sub_free"][:2])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Неверная позиция субтитров") from None
+        data["sub_free"] = [min(1.0, max(0.0, x)), min(1.0, max(0.0, y))]
     if "sub_position" in data and data["sub_position"] not in subtitles.POSITIONS:
         raise HTTPException(400, "Неизвестное положение субтитров")
     if "sub_speed" in data and data["sub_speed"] not in subtitles.SPEEDS:

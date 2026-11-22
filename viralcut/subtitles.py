@@ -257,6 +257,9 @@ def _pos_tag(position: str, offset: int) -> str:
         return f"\\an8\\pos({PLAY_W // 2},{y})"
     if position == "middle":
         y = max(120, min(PLAY_H - 120, 960 - offset))
+        if free_pos and len(free_pos) == 2:
+            return (f"\\an5\\pos({int(float(free_pos[0]) * PLAY_W)},"
+                    f"{int(float(free_pos[1]) * PLAY_H)})")
         return f"\\an5\\pos({PLAY_W // 2},{y})"
     y = max(200, min(PLAY_H - 80, 1580 - offset))
     return f"\\an2\\pos({PLAY_W // 2},{y})"
@@ -360,6 +363,7 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
               show_hook: bool = True, sub_size: int = 118, hook_size: int = 96,
               font: str = "montserrat",
               position: str = "bottom", offset: int = 0,
+              free_pos: Optional[List[float]] = None,
               speed: str = "calm") -> str:
     """Собирает ASS-файл для фрагмента. Тайминги слов абсолютные (от начала видео)."""
     accent_color = ACCENTS.get(accent, ACCENTS["yellow"])

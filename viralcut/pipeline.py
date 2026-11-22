@@ -37,6 +37,7 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     "max_height": 1080,
     "segments": False,
     "audio_track": 0,
+    "sub_free": None,
     "force_hd": False,
 }
 
@@ -86,7 +87,8 @@ def normalize_options(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     except Exception:
         mh = 1080
     opts["max_height"] = mh if mh in (1080, 720, 480, 360) else 1080
-    opts["segments"] = bool(opts.get("segments"))
+    # эконом-режим отключён: качество выбирается явно (max_height)
+    opts["segments"] = False
     try:
         opts["audio_track"] = max(0, int(opts.get("audio_track") or 0))
     except (TypeError, ValueError):
@@ -257,7 +259,7 @@ def _clip_settings(opts: Dict[str, Any]) -> Dict[str, Any]:
         "accent": opts["accent"], "uppercase": opts["uppercase"],
         "show_hook": opts["show_hook"], "focus_x": 0.5, "sub_size": opts["sub_size"],
         "sub_font": opts["sub_font"], "sub_position": opts["sub_position"],
-        "sub_offset": opts["sub_offset"], "sub_speed": opts["sub_speed"],
+        "sub_offset": opts["sub_offset"], "sub_free": opts.get("sub_free"), "sub_speed": opts["sub_speed"],
         "segments": bool(opts.get("segments")),
     }
 
@@ -521,7 +523,7 @@ def process_project(pid: str) -> None:
             "accent": opts["accent"], "uppercase": opts["uppercase"],
             "show_hook": opts["show_hook"], "focus_x": 0.5, "sub_size": opts["sub_size"],
             "sub_font": opts["sub_font"], "sub_position": opts["sub_position"],
-            "sub_offset": opts["sub_offset"], "sub_speed": opts["sub_speed"],
+            "sub_offset": opts["sub_offset"], "sub_free": opts.get("sub_free"), "sub_speed": opts["sub_speed"],
         }
         _check_cancel(pid)
         total = len(found)

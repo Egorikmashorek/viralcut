@@ -356,6 +356,9 @@ function heroHTML() {
       <div class="opt">
         ${optIcon("aspect", "ico-cyan")}
         <span class="opt-label">Формат</span>
+        <div class="seg" data-group="language" style="margin-bottom:10px">
+          ${[["auto","Авто"],["ru","Русский"],["en","English"]].map(([v,l]) => `<button data-val="${v}" class="${(o.language||"auto") === v ? "active" : ""}">${l}</button>`).join("")}
+        </div>
         <div class="seg" data-group="aspect">
           ${["9:16", "1:1", "16:9", "4:5"].map((a) => `<button data-val="${a}" class="${o.aspect === a ? "active" : ""}">${a}</button>`).join("")}
         </div>
@@ -519,8 +522,9 @@ function heroOptions() {
     sub_position: state.opts.subPos,
     sub_offset: state.opts.subOffset,
     sub_speed: state.opts.subSpeed,
+  language: state.opts.language || "auto",
     cookies_browser: state.opts.cookies,
-    language: "auto"
+    language: state.opts.language || "auto"
   };
 }
 
@@ -594,20 +598,20 @@ function renderQuality(data) {
     <div class="quality-title">${esc(data.title)}</div>
     <div class="quality-meta">${fmtDur(data.duration)} · ${esc(data.uploader || "")}</div>
     <div class="quality-cards">${cards}</div>
-    <label class="toggle eco-row"><input type="checkbox" id="qualityEco" ${data.duration > 600 ? "checked" : ""}/><span class="track"></span><span>Экономно: сначала анализ, потом только выбранные моменты</span></label>
+
     <div class="quality-note" id="qualityNote"></div>
     <div class="modal-foot" style="padding:16px 0 0;border:0">
       <button class="btn-ghost" data-close="probe">Отмена</button>
       <button class="btn-primary" id="qualityStart">Скачать и настроить</button>
     </div>`;
   let chosen = rec;
-  state.segmentsChoice = data.duration > 600;
+  state.segmentsChoice = false;
   const note = $("#qualityNote");
   const updateNote = () => {
     const opt = data.options.find((o) => o.height === chosen);
     if (!opt) return;
     const eco = $("#qualityEco")?.checked;
-    state.segmentsChoice = !!eco;
+    state.segmentsChoice = false;
     if (eco) {
       const audioMb = data.audio_size_mb || Math.max(1, Math.round(data.duration * 0.012));
       note.textContent = `Сначала только аудио (~${formatSize(audioMb)}), анализ, затем видео скачается лишь для выбранных моментов — обычно в 5–20 раз меньше полного файла.`;
@@ -1024,7 +1028,7 @@ function streamHTML(project) {
 function reviewHTML(project) {
   const m = project.meta || {};
   const meta = [
-    m.segments_mode ? "экономный режим" : resLabel(m),
+    resLabel(m),
     project.duration ? fmtDur(project.duration) : "",
     m.pending ? `найдено ${m.pending} моментов` : "",
     m.download_seconds ? `скачано за ${Math.round(m.download_seconds)} с` : ""
@@ -1105,7 +1109,7 @@ function renderMain(force) {
     bindClips();
     updateProgress(project);
   } else if (project.status === "review") {
-    main.innerHTML = reviewHTML(project) + pipCardHTML(state.detail);
+    main.innerHTML = reviewHTML(project) + manualClipHTML() + pipCardHTML(state.detail);
     initPip(state.detail);
   } else if (project.status === "cancelled") {
     main.innerHTML = cancelledHTML(project);
@@ -1620,7 +1624,7 @@ async function tmplPoll() {
       $("#tmplStart").disabled = false;
       const m = project.meta || {};
       $("#tmplMeta").textContent = [
-        m.segments_mode ? "Экономный режим: видео качается только для выбранных моментов" : "",
+        "",
         m.pending ? `Найдено моментов: ${m.pending}` : "",
         !m.segments_mode && m.source_height ? `Источник: ${resLabel(m)}` : "",
         project.duration ? `Длительность: ${fmtDur(project.duration)}` : ""

@@ -249,3 +249,19 @@ class AdFilterTest(unittest.TestCase):
             "Никто не ожидал такого результата.",
         ]))
         self.assertEqual(analyze.detect_ads(sents), [])
+
+
+class SilenceGapsTest(unittest.TestCase):
+    def test_finds_long_pauses_only(self):
+        from viralcut import analyze
+
+        hop = 0.25
+        curve = [-30.0] * 80
+        for i in range(8, 16):      # 2 секунды тишины
+            curve[i] = -55.0
+        for i in range(20, 22):     # 0.5 с — ниже порога по длине
+            curve[i] = -55.0
+        gaps = analyze.silence_gaps(curve, -30.0, 0.0, 20.0, hop=hop)
+        self.assertEqual(len(gaps), 2)
+        self.assertAlmostEqual(gaps[0]["start"], 2.0, places=1)
+        self.assertAlmostEqual(gaps[0]["length"], 2.0, places=1)

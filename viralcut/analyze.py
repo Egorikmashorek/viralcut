@@ -77,6 +77,10 @@ CONTINUATION_END = [
 
 # Спонсорские вставки: их нельзя резать в клипы — «промокод», «ссылка в описании»
 # и «этот выпуск спонсируется» в ленте выглядят как реклама, а не как контент.
+HOOK_STARTERS = ["почему", "как", "что если", "а что", "знаешь", "смотри",
+                 "представь", "внимание", "главное", "секрет", "ошибка",
+                 "why", "how", "what if", "watch", "imagine", "secret", "mistake"]
+
 AD_STRONG = [
     "промокод", "промо код", "промокоду", "скидк", "скидка", "скидку", "купон",
     "ссылка в описании", "в описании", "по ссылке", "спонсор", "реклама",
@@ -150,6 +154,19 @@ def _ad_overlap(start: float, end: float, blocks: List[Dict[str, Any]]) -> float
     for block in blocks:
         total += max(0.0, min(end, block["end"]) - max(start, block["start"]))
     return total
+
+
+def _hook_bonus(text: str) -> float:
+    """Бонус за цепляющее начало: вопрос, цифра, обещание."""
+    low = _norm(text)
+    bonus = 0.0
+    if any(low.startswith(h) for h in HOOK_STARTERS):
+        bonus += 3.0
+    if re.search(r"\d", low[:40]):
+        bonus += 1.5
+    if low.rstrip().endswith("?"):
+        bonus += 2.0
+    return bonus
 
 
 def _starts_with_context(sent: Dict[str, Any]) -> bool:
@@ -492,6 +509,10 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
                     # окно в основном про спонсора — в клипы не берём
                     break
                 score, parts = _score_window(window, duration, curve, mean_db, hop)
+                hook = _hook_bonus(window[0]["text"])
+                if hook:
+                    score += hook
+                    parts = {**parts, "hook": round(hook, 1)}
                 candidates.append({
                     "start": round(w_start, 3), "end": round(w_end, 3),
                     "duration": round(w_end - w_start, 2),
@@ -614,3 +635,28 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
             "words": words,
         })
     return out
+
+
+def silence_gaps(curve: List[float], mean_db: float, start: float, end: float,
+                 hop: float = 0.25, min_gap: float = 0.45,
+                 threshold: float = 9.0) -> List[Dict[str, float]]:
+    """Паузы внутри окна: тише среднего на threshold дБ дольше min_gap."""
+    gaps: List[Dict[str, float]] = []
+    limit = mean_db - threshold
+    run_start = None
+    for i in range(max(0, int(start / hop)), min(len(curve), int(end / hop) + 1)):
+        quiet = float(curve[i]) < limit
+        t = i * hop
+        if quiet and run_start is None:
+            run_start = t
+        elif not quiet and run_start is not None:
+            if t - run_start >= min_gap:
+                gaps.append({"start": round(run_start, 2), "end": round(t, 2),
+                             "length": round(t - run_start, 2)})
+            run_start = None
+    if run_start is not None:
+        tail = end
+        if tail - run_start >= min_gap:
+            gaps.append({"start": round(run_start, 2), "end": round(tail, 2),
+                         "length": round(tail - run_start, 2)})
+    return gaps

@@ -24,6 +24,14 @@ class ProjectIn(BaseModel):
     prepare_only: bool = False
 
 
+class PipIn(BaseModel):
+    enabled: Optional[bool] = None
+    cam: Optional[Dict[str, Any]] = None
+    pos: Optional[List[float]] = None
+    size: Optional[float] = None
+    radius: Optional[int] = None
+
+
 class SettingsIn(BaseModel):
     encoder: Optional[str] = None
     download_dir: Optional[str] = None
@@ -172,6 +180,54 @@ def health() -> Dict[str, Any]:
         "limits": resources.summary(),
         "projects": db.count_projects(),
     }
+
+
+@app.get("/api/projects/{pid}/pip")
+def project_pip(pid: str) -> Dict[str, Any]:
+    project = db.get_project(pid)
+    if not project:
+        raise HTTPException(404, "Проект не найден")
+    return {"pip": (project.get("options") or {}).get("pip") or {}}
+
+
+@app.post("/api/projects/{pid}/pip")
+def project_pip_set(pid: str, body: PipIn) -> Dict[str, Any]:
+    project = db.get_project(pid)
+    if not project:
+        raise HTTPException(404, "Проект не найден")
+    options = dict(project.get("options") or {})
+    current = dict(options.get("pip") or {})
+    if body.enabled is not None:
+        current["enabled"] = body.enabled
+    if body.cam:
+        try:
+            current["cam"] = {k: int(body.cam[k]) for k in ("x", "y", "w", "h")}
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "Неверные координаты камеры")
+    if body.pos:
+        current["pos"] = [max(0.0, min(1.0, float(body.pos[0]))), max(0.0, min(1.0, float(body.pos[1])))]
+    if body.size is not None:
+        current["size"] = max(0.12, min(0.45, float(body.size)))
+    if body.radius is not None:
+        current["radius"] = max(0, min(60, int(body.radius)))
+    options["pip"] = current
+    db.update_project(pid, options=options)
+    return {"pip": current}
+
+
+@app.get("/api/projects/{pid}/frame.jpg")
+def project_frame(pid: str, t: float = 0.0, width: int = 900) -> FileResponse:
+    project = db.get_project(pid)
+    if not project or not project.get("source"):
+        raise HTTPException(404, "Кадр недоступен")
+    workdir = PROJECTS_DIR / pid
+    out = workdir / f"frame_{int(t)}_{width}.jpg"
+    if not out.exists():
+        try:
+            render.snapshot(Path(project["source"]), out, t=t, width=width)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"Не удалось получить кадр: {exc}")
+    return FileResponse(out, media_type="image/jpeg")
 
 
 @app.get("/api/settings")
@@ -515,6 +571,20 @@ def clip_srt(cid: str) -> Response:
                    f"filename*=UTF-8''{quote(title + '.srt')}")
     return Response(content=body, media_type="application/x-subrip",
                     headers={"Content-Disposition": disposition})
+
+
+@app.post("/api/projects/{pid}/pip/apply")
+def project_pip_apply(pid: str) -> Dict[str, Any]:
+    """Пересобирает готовые клипы проекта с текущими настройками окна камеры."""
+    project = db.get_project(pid)
+    if not project:
+        raise HTTPException(404, "Проект не найден")
+    clips = [c for c in db.list_clips(pid) if c.get("path")]
+    if not clips:
+        raise HTTPException(400, "Нет готовых клипов — сначала запустите нарезку")
+    for clip in clips:
+        jobs.submit_rerender(clip["id"], {})
+    return {"ok": True, "clips": len(clips)}
 
 
 @app.post("/api/clips/{cid}/rerender")

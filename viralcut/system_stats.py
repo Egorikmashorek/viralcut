@@ -23,7 +23,13 @@ import sys as _sys
 from typing import Any, Dict, List, Optional, Tuple
 
 _CACHE: Dict[str, Any] = {}
+
+
+def _platform() -> str:
+    return sys.platform
 _GPU_CACHE: Dict[str, Any] = {"value": None, "ts": 0.0}
+_GPU_FAIL_TS: List[float] = [0.0]
+_GPU_SOURCE: List[str] = [""]
 _MEM_CACHE: Dict[str, Any] = {"value": None, "ts": 0.0}
 
 
@@ -102,7 +108,7 @@ def _cpu_linux() -> Optional[Tuple[int, int]]:
 
 
 def _cpu_ticks() -> Optional[Tuple[int, int]]:
-    if sys.platform == "darwin":
+    if _platform() == "darwin":
         return _cpu_macos()
     if sys.platform == "win32":
         return _cpu_windows()
@@ -151,7 +157,7 @@ def cpu_percent(force: bool = False) -> Optional[float]:
 
 def memory(force: bool = False) -> Dict[str, Any]:
     now = time.monotonic()
-    if not force and _MEM_CACHE["value"] and now - _MEM_CACHE["ts"] < 1.0:
+    if not force and _MEM_CACHE.get("value") and now - _MEM_CACHE.get("ts", 0.0) < 1.0:
         return dict(_MEM_CACHE["value"])
     result = _memory_uncached()
     _MEM_CACHE["value"] = result
@@ -162,7 +168,7 @@ def memory(force: bool = False) -> Dict[str, Any]:
 def _memory_uncached() -> Dict[str, Any]:
     total = 0
     used = 0
-    if sys.platform == "darwin":
+    if _platform() == "darwin":
         try:
             total = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True,
                                        text=True, timeout=3, **_spawn()).stdout.strip() or 0)
@@ -181,7 +187,7 @@ def _memory_uncached() -> Dict[str, Any]:
             used = used_pages * page
         except Exception:
             pass
-    elif sys.platform == "win32":
+    elif _platform() == "win32":
         try:
             class MEMSTATUS(ctypes.Structure):
                 _fields_ = [("dwLength", ctypes.c_uint32), ("dwMemoryLoad", ctypes.c_uint32),
@@ -216,6 +222,113 @@ def _memory_uncached() -> Dict[str, Any]:
 
 
 # --- Видеокарта ---------------------------------------------------------------
+
+def _gpu_windows_pdh() -> Dict[str, Any]:
+    """Загрузка GPU через счётчики PDH — без запуска nvidia-smi и окон консоли.
+
+    Windows отдаёт производительность видеокарты в счётчиках «GPU Engine».
+    Читаем их напрямую через pdh.dll: ни одного дочернего процесса.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes as wt
+    except Exception:  # noqa: BLE001
+        return {"percent": None, "name": ""}
+
+    try:
+        pdh = ctypes.WinDLL("pdh.dll")  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return {"percent": None, "name": ""}
+
+    query = wt.HANDLE()
+    if pdh.PdhOpenQueryW(None, ctypes.c_size_t(0), ctypes.byref(query)) != 0:
+        return {"percent": None, "name": ""}
+
+    path = "\\GPU Engine(*)\\Utilization Percentage"
+    size = wt.DWORD(0)
+    pdh.PdhExpandWildCardPathW(None, path, None, ctypes.byref(size), wt.DWORD(0))
+    if size.value <= 0:
+        pdh.PdhCloseQuery(query)
+        return {"percent": None, "name": ""}
+
+    buf = ctypes.create_unicode_buffer(size.value + 2)
+    if pdh.PdhExpandWildCardPathW(None, path, buf, ctypes.byref(size), wt.DWORD(0)) != 0:
+        pdh.PdhCloseQuery(query)
+        return {"percent": None, "name": ""}
+
+    counters = []
+    for counter_path in buf[:size.value].split("\0"):
+        if not counter_path or "engtype_3d" not in counter_path.lower():
+            continue
+        handle = wt.HANDLE()
+        if pdh.PdhAddCounterW(query, counter_path, ctypes.c_size_t(0), ctypes.byref(handle)) == 0:
+            counters.append(handle)
+    if not counters:
+        pdh.PdhCloseQuery(query)
+        return {"percent": None, "name": ""}
+
+    pdh.PdhCollectQueryData(query)
+    time.sleep(0.08)
+    pdh.PdhCollectQueryData(query)
+
+    total = 0.0
+    PDH_FMT_DOUBLE = 0x00000200
+    for handle in counters:
+        value = ctypes.c_double(0.0)
+        counter_type = wt.DWORD(0)
+        if pdh.PdhGetFormattedCounterValue(handle, PDH_FMT_DOUBLE, ctypes.byref(counter_type),
+                                           ctypes.byref(value)) == 0:
+            total += max(0.0, value.value)
+    pdh.PdhCloseQuery(query)
+    percent = int(round(min(100.0, total)))
+    return {"percent": percent, "name": "GPU"}
+
+
+def _gpu_windows_registry_name() -> str:
+    """Имя видеокарты из реестра — тоже без запуска процессов."""
+    try:
+        import winreg  # type: ignore[import-not-found]
+
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                             r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\WinSAT")
+        value, _ = winreg.QueryValueEx(key, "PrimaryAdapterString")
+        return str(value).strip() or "GPU"
+    except Exception:  # noqa: BLE001
+        return "GPU"
+
+
+def _gpu_windows() -> Dict[str, Any]:
+    """Сначала PDH; nvidia-smi — только как редкий запасной вариант (30 с кэш)."""
+    now = time.monotonic()
+    if _GPU_CACHE.get("value") and now - _GPU_CACHE.get("ts", 0.0) < 2.0:
+        return dict(_GPU_CACHE["value"])
+
+    result = _gpu_windows_pdh()
+    if result.get("percent") is not None:
+        _GPU_SOURCE[0] = "pdh"
+        result["name"] = _gpu_windows_registry_name()
+        _GPU_CACHE["value"] = result
+        _GPU_CACHE["ts"] = now
+        return dict(result)
+
+    # PDH не отдал данные (старая Windows/счётчики отключены) — nvidia-smi,
+    # но не чаще раза в 30 секунд и всегда без окна консоли
+    legacy = _GPU_CACHE.get("legacy") or {"value": None, "ts": 0.0}
+    if legacy["value"] and now - legacy["ts"] < 30.0:
+        return dict(legacy["value"])
+    # неудачу тоже запоминаем, чтобы не спавнить nvidia-smi каждые 2 секунды
+    if now - _GPU_FAIL_TS[0] < 30.0:
+        return {"percent": None, "name": _gpu_windows_registry_name()}
+    smi = _gpu_nvidia()
+    if smi.get("percent") is not None:
+        _GPU_SOURCE[0] = "nvidia-smi"
+        _GPU_CACHE["legacy"] = {"value": smi, "ts": now}
+        _GPU_CACHE["value"] = smi
+        _GPU_CACHE["ts"] = now
+        return dict(smi)
+    _GPU_FAIL_TS[0] = now
+    return {"percent": None, "name": _gpu_windows_registry_name()}
+
 
 def _gpu_macos() -> Dict[str, Any]:
     try:
@@ -254,11 +367,14 @@ def _gpu_nvidia() -> Dict[str, Any]:
 def gpu(force: bool = False) -> Dict[str, Any]:
     """Видеокарта с кэшем на 1.5 с: на Windows каждый вызов — это nvidia-smi."""
     now = time.monotonic()
-    if not force and _GPU_CACHE["value"] and now - _GPU_CACHE["ts"] < 1.5:
+    if not force and _GPU_CACHE.get("value") and now - _GPU_CACHE.get("ts", 0.0) < 1.5:
         return dict(_GPU_CACHE["value"])
-    if sys.platform == "darwin":
+    plat = _platform()
+    if plat == "darwin":
         result = _gpu_macos()
-    elif sys.platform in ("win32", "linux"):
+    elif plat == "win32":
+        return _gpu_windows()
+    elif plat == "linux":
         result = _gpu_nvidia()
     else:
         result = {"percent": None, "name": ""}
@@ -286,6 +402,7 @@ def snapshot(app_stats: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Всё сразу: CPU, память, GPU и (опционально) наши лимиты/энкодер."""
     data = {
         "cpu": cpu_percent(),
+        "monitor": {"gpu_source": _GPU_SOURCE[0] or ("ioreg" if _platform() == "darwin" else "none")},
         "ram": memory(),
         "gpu": gpu(),
         "ts": round(time.time(), 3),

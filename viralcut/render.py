@@ -238,7 +238,8 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                 mode: str = "blur", focus_x: float = 0.5,
                 on_progress: Optional[Callable[[float], None]] = None,
                 crf: int = 21, preset: str = "veryfast",
-                crop_path: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                crop_path: Optional[Dict[str, Any]] = None,
+                pip: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     w, h = ASPECTS.get(aspect, ASPECTS["9:16"])
     duration = max(0.4, clip_end - clip_start)
     info = probe(source)
@@ -247,6 +248,15 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
         preset = "veryfast"
 
     sharpen_base = info["width"] < w * 0.75
+
+    pip_cam = (pip or {}).get("cam") if pip and pip.get("enabled", True) else None
+    pip_size = int(round(w * float((pip or {}).get("size", 0.28))))
+    pip_size -= pip_size % 2
+    pip_mask = None
+    if pip_cam and pip_size >= 64:
+        from . import pip as _pip
+
+        pip_mask = _pip.ensure_mask(pip_size, int((pip or {}).get("radius", 20)))
 
     def _build_filters(path_used: Optional[Dict[str, Any]]) -> str:
         sharp = sharpen_base
@@ -257,6 +267,14 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
             parts = [_bg_chain(w, h, focus_x, sharp)]
         else:
             parts = [_crop_chain(w, h, focus_x, sharpen=sharp)]
+        if pip_mask is not None and parts[0].rstrip().endswith("[base]"):
+            from . import pip as _pip
+
+            pos = (pip or {}).get("pos") or [0.72, 0.78]
+            px = int(round(min(1.0, max(0.0, float(pos[0]))) * (w - pip_size)))
+            py = int(round(min(1.0, max(0.0, float(pos[1]))) * (h - pip_size)))
+            main_step = parts[0].rstrip()[:-len("[base]")] + "[_basem]"
+            parts = [_pip.build_filters(pip_cam, pip_size, px, py, pip_mask, main_step)]
         if ass_path is not None:
             parts.append(
                 f"[base]ass=filename='{_esc(ass_path)}':fontsdir='{_esc(custom_fonts.libass_dir())}':alpha=1,"
@@ -274,6 +292,14 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
            "-progress", "pipe:1",
            "-ss", f"{clip_start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)]
 
+    if pip_cam and pip_size >= 64:
+        from . import pip as _pip
+
+        mask = _pip.ensure_mask(pip_size, int((pip or {}).get("radius", 20)))
+        if mask is not None:
+            cmd += ["-loop", "1", "-framerate", "30", "-i", str(mask)]
+    if os.environ.get("VIRALCUT_DEBUG_RENDER"):
+        print("[render] cmd:", " ".join(cmd), file=sys.stderr, flush=True)
     cmd += ["-filter_complex", filter_complex, "-map", vlabel]
     if info["has_audio"]:
         measured = _measure_loudness(source, clip_start, duration)
@@ -303,6 +329,8 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                  # декодер и фильтры тоже ограничиваем, иначе ffmpeg забирает все ядра
                  "-threads", threads, "-filter_threads", threads,
                  "-ss", f"{clip_start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)])
+        if pip_mask is not None:
+            built += ["-loop", "1", "-framerate", "30", "-i", str(pip_mask)]
         built += ["-filter_complex", filters, "-map", vlabel]
         if info["has_audio"]:
             if measured:
@@ -365,6 +393,17 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
     if on_progress:
         on_progress(1.0)
     return {"path": out_path, "duration": round(duration, 2), "width": w, "height": h}
+
+
+def snapshot(source: Path, out: Path, t: float = 0.0, width: int = 900) -> Path:
+    """Один кадр исходника в JPEG — для выбора окна камеры в интерфейсе."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [ffmpeg(), "-y", "-v", "error", "-ss", f"{max(0.0, t):.3f}", "-i", str(source),
+           "-frames:v", "1", "-vf", f"scale={width}:-2", "-q:v", "3", str(out)]
+    proc = run(cmd, timeout=90)
+    if proc.returncode != 0 or not out.exists():
+        raise MediaError("Не удалось получить кадр: " + (proc.stderr or "")[-200:])
+    return out
 
 
 def make_preview(clip_path: Path, out_path: Path, width: int = 540) -> Optional[Path]:

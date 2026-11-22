@@ -220,6 +220,30 @@ def _copy_to_download_dir(source: Path, title: str) -> None:
         print(f"[download] не удалось скопировать исходник: {exc}", file=sys.stderr, flush=True)
 
 
+def pip_options(opts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Окно стримера из опций проекта: включено, где камера и где окно."""
+    conf = opts.get("pip") or {}
+    if not conf.get("enabled"):
+        return None
+    cam = conf.get("cam") or {}
+    try:
+        cw = int(cam.get("w") or 0)
+        ch = int(cam.get("h") or 0)
+        cx = int(cam.get("x") or 0)
+        cy = int(cam.get("y") or 0)
+    except (TypeError, ValueError):
+        return None
+    if cw < 32 or ch < 32:
+        return None
+    pos = conf.get("pos") or [0.72, 0.78]
+    return {
+        "cam": {"x": cx, "y": cy, "w": cw, "h": ch},
+        "pos": [float(pos[0]), float(pos[1])],
+        "size": float(conf.get("size") or 0.28),
+        "radius": int(conf.get("radius") or 20),
+    }
+
+
 def _clip_settings(opts: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "aspect": opts["aspect"], "mode": opts["mode"], "subtitles": opts["subtitles"],
@@ -519,7 +543,7 @@ def process_project(pid: str) -> None:
                     state["cancel"] = True
                 return False
             try:
-                _render_one(source, workdir, clip, clip_settings, lambda p: None)
+                _render_one(source, workdir, clip, clip_settings, lambda p: None, opts)
             except Cancelled:
                 with lock:
                     state["cancel"] = True
@@ -586,7 +610,8 @@ def run_project(pid: str) -> None:
 
 
 def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
-                settings: Dict[str, Any], on_progress: Optional[Callable[[float], None]] = None) -> None:
+                settings: Dict[str, Any], on_progress: Optional[Callable[[float], None]] = None,
+                opts: Optional[Dict[str, Any]] = None) -> None:
     out_dir = workdir / "clips"
     ass_dir = workdir / "ass"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -626,7 +651,7 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
         source, clip["start"], clip["end"], out_path, ass_path=ass_path,
         aspect=settings.get("aspect", "9:16"), mode=mode,
         focus_x=float(settings.get("focus_x", 0.5)), on_progress=on_progress,
-        crop_path=crop_path,
+        crop_path=crop_path, pip=pip_options(opts or {}),
     )
     thumb_path = workdir / "thumbs" / f"{clip['id']}.jpg"
     render.make_thumb(out_path, thumb_path, at=min(1.2, max(0.2, (clip["end"] - clip["start"]) * 0.15)))
@@ -674,7 +699,8 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
                    settings=settings, error=None)
     updated = db.get_clip(clip_id)
     if project.get("source"):
-        _render_one(Path(project["source"]), workdir, updated, settings, on_progress)
+        _render_one(Path(project["source"]), workdir, updated, settings, on_progress,
+                    project.get("options") or {})
     else:
         from . import live
         # клип из прямого эфира: берём фрагмент из записанных сегментов

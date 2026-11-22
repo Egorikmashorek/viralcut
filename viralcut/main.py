@@ -13,7 +13,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import custom_fonts, db, jobs, pipeline, render, resources, settings as app_settings, system_stats, transcribe
+from . import (custom_fonts, db, jobs, pipeline, render, resources,
+               settings as app_settings, system_stats, transcribe, utils)
 from ._version import __version__
 from .config import ASSETS_DIR, DATA_DIR, PROJECTS_DIR, WEB_DIR, ffmpeg
 
@@ -182,6 +183,52 @@ def health() -> Dict[str, Any]:
         "limits": resources.summary(),
         "projects": db.count_projects(),
     }
+
+
+class ManualClipIn(BaseModel):
+    start: str
+    end: str
+    trim_silence: bool = True
+
+
+@app.post("/api/projects/{pid}/clips")
+def project_add_clip(pid: str, body: ManualClipIn) -> Dict[str, Any]:
+    """Клип по таймкоду: пользователь сам указывает начало и конец."""
+    start = pipeline.parse_timecode(body.start)
+    end = pipeline.parse_timecode(body.end)
+    if start is None or end is None:
+        raise HTTPException(400, "Время в формате мм:сс или секунды")
+    if end <= start:
+        raise HTTPException(400, "Конец должен быть позже начала")
+    try:
+        return pipeline.add_manual_clip(pid, start, end, body.trim_silence)
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/projects/{pid}/audio")
+def project_audio(pid: str) -> Dict[str, Any]:
+    """Звуковые дорожки исходника: язык, название, каналы."""
+    project = db.get_project(pid)
+    if not project or not project.get("source"):
+        return {"tracks": [], "selected": 0}
+    tracks = utils.audio_tracks(Path(project["source"]))
+    return {"tracks": tracks, "selected": int((project.get("options") or {}).get("audio_track") or 0)}
+
+
+@app.post("/api/projects/{pid}/audio")
+def project_audio_set(pid: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    project = db.get_project(pid)
+    if not project:
+        raise HTTPException(404, "Проект не найден")
+    try:
+        track = max(0, int(body.get("index") or 0))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Неверная дорожка") from None
+    options = dict(project.get("options") or {})
+    options["audio_track"] = track
+    db.update_project(pid, options=options)
+    return {"selected": track}
 
 
 @app.get("/api/projects/{pid}/pip")

@@ -6,10 +6,11 @@ import re
 import shutil
 import threading
 import time
+import json
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import analyze, db, downloader, reframe, render, subtitles, transcribe, utils
 from .errors import Cancelled
@@ -35,6 +36,7 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     "sub_speed": "calm",
     "max_height": 1080,
     "segments": False,
+    "audio_track": 0,
     "force_hd": False,
 }
 
@@ -85,6 +87,10 @@ def normalize_options(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         mh = 1080
     opts["max_height"] = mh if mh in (1080, 720, 480, 360) else 1080
     opts["segments"] = bool(opts.get("segments"))
+    try:
+        opts["audio_track"] = max(0, int(opts.get("audio_track") or 0))
+    except (TypeError, ValueError):
+        opts["audio_track"] = 0
     opts["force_hd"] = bool(opts.get("force_hd"))
     opts["language"] = str(opts.get("language") or "auto")
     if opts["language"] == "auto":
@@ -644,15 +650,17 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
                 source, clip["start"], clip["end"], aspect=settings.get("aspect", "9:16"))
         except Exception:
             crop_path = None
-        # если лиц почти нет (скринкаст, слайды) — сохраняем весь кадр на размытом фоне
+        # если лиц почти нет (скринкаст, слайды) — заполняем кадр по центру,
+        # а не оставляем размытые поля: так просили пользователи
         if crop_path and crop_path.get("coverage", 1.0) < 0.18:
-            mode = "blur"
+            mode = "crop"
             crop_path = None
     render.render_clip(
         source, clip["start"], clip["end"], out_path, ass_path=ass_path,
         aspect=settings.get("aspect", "9:16"), mode=mode,
         focus_x=float(settings.get("focus_x", 0.5)), on_progress=on_progress,
         crop_path=crop_path, pip=pip_options(opts or {}),
+        audio_track=int((opts or {}).get("audio_track") or 0),
     )
     thumb_path = workdir / "thumbs" / f"{clip['id']}.jpg"
     render.make_thumb(out_path, thumb_path, at=min(1.2, max(0.2, (clip["end"] - clip["start"]) * 0.15)))
@@ -734,3 +742,80 @@ def _slug(text: str) -> str:
 
 def delete_project_files(project_id: str) -> None:
     shutil.rmtree(PROJECTS_DIR / project_id, ignore_errors=True)
+
+
+# --- ручная нарезка по таймкоду ---------------------------------------------
+
+def parse_timecode(value: str) -> Optional[float]:
+    """«12:40», «1:02:03» или «760» → секунды."""
+    text = str(value or "").strip().replace(",", ".")
+    if not text:
+        return None
+    try:
+        if ":" in text:
+            parts = [float(p) for p in text.split(":")]
+            total = 0.0
+            for part in parts:
+                total = total * 60 + part
+            return max(0.0, total)
+        return max(0.0, float(text))
+    except ValueError:
+        return None
+
+
+def trim_silence(source: Path, start: float, end: float,
+                 max_trim: float = 3.0) -> Tuple[float, float]:
+    """Подтягивает края клипа к речи, чтобы не брать пустые секунды."""
+    try:
+        curve, mean_db = analyze.energy_curve(source)
+        if not curve:
+            return start, end
+        new_start = analyze._nearest_quiet(curve, mean_db, start + 0.05, 0.25, window=0.35)
+        new_end = analyze._nearest_quiet(curve, mean_db, end - 0.05, 0.25, window=0.35)
+        new_start = max(start, min(new_start, start + max_trim))
+        new_end = min(end, max(new_end, end - max_trim))
+        if new_end - new_start >= 3:
+            return new_start, new_end
+    except Exception:  # noqa: BLE001
+        pass
+    return start, end
+
+
+def add_manual_clip(pid: str, start: float, end: float,
+                    trim: bool = True) -> Dict[str, Any]:
+    """Создаёт клип по таймкоду, без анализа: пользователь сам выбрал момент."""
+    project = db.get_project(pid)
+    if not project or not project.get("source"):
+        raise RuntimeError("Ручная нарезка доступна для загруженных видео и ссылок")
+    source = Path(project["source"])
+    duration = float(project.get("duration") or utils.media_duration(source) or 0)
+    start = max(0.0, min(float(start), max(0.0, duration - 1)))
+    end = min(float(end), duration if duration else float(end))
+    if end - start < 3:
+        raise RuntimeError("Клип короче 3 секунд")
+    if trim:
+        start, end = trim_silence(source, start, end)
+    words: List[Dict[str, Any]] = []
+    try:
+        transcript = (project.get("meta") or {}).get("transcript")
+        if not transcript:
+            path = PROJECTS_DIR / pid / "transcript.json"
+            if path.exists():
+                transcript = json.loads(path.read_text(encoding="utf-8"))
+        for seg in (transcript or []):
+            for word in seg.get("words") or []:
+                if float(word["end"]) > start and float(word["start"]) < end:
+                    words.append(word)
+    except Exception:  # noqa: BLE001
+        words = []
+    opts = project.get("options") or {}
+    settings = _clip_settings(opts)
+    existing = db.list_clips(pid)
+    idx = max([int(c["idx"]) for c in existing], default=-1) + 1
+    clip = db.add_clip(pid, idx, start, end, 1.0, f"Клип {idx + 1}", "",
+                       f"Вручную {int(start // 60)}:{int(start % 60):02d}", words, settings)
+    from . import jobs as _jobs
+
+    db.update_project(pid, status="running", stage="Рендер клипа")
+    _jobs.submit_rerender(clip["id"], {})
+    return clip

@@ -72,6 +72,34 @@ def probe(path: Path) -> Dict[str, Any]:
     return info
 
 
+def audio_tracks(path: Path) -> List[Dict[str, Any]]:
+    """Звуковые дорожки файла: порядок, язык, каналы — по выводу ffmpeg."""
+    try:
+        proc = run([ffmpeg(), "-hide_banner", "-i", str(path)], timeout=30)
+        text = (proc.stderr or "") + (proc.stdout or "")
+    except Exception:  # noqa: BLE001
+        return []
+    tracks: List[Dict[str, Any]] = []
+    order = 0
+    for line in text.splitlines():
+        m = re.search(r"Stream #0:(\d+)(?:\[[^\]]+\])?(?:\(([a-z]{2,3})\))?: Audio: ([^,]+)", line)
+        if not m:
+            continue
+        title = ""
+        mt = re.search(r"\(title: ([^)]+)\)", line)
+        if mt:
+            title = mt.group(1).strip()
+        channels, stereo = 0, 1 if "stereo" in line else 2
+        mch = re.search(r"(\d+(?:\.\d+)?) (?:ch|stereo|mono)", line)
+        if mch:
+            channels = float(mch.group(1))
+        tracks.append({"index": order, "stream": int(m.group(1)),
+                       "language": (m.group(2) or "").lower(),
+                       "title": title, "channels": channels or 2})
+        order += 1
+    return tracks
+
+
 def media_duration(path: Path) -> float:
     """Длительность любого медиа, включая аудио без видеодорожки."""
     proc = run([ffmpeg(), "-hide_banner", "-i", str(path)])

@@ -1112,7 +1112,7 @@ function renderMain(force) {
   } else if (project.status === "error") {
     main.innerHTML = errorHTML(project);
   } else {
-    main.innerHTML = resultsHTML() + pipCardHTML(state.detail);
+    main.innerHTML = resultsHTML() + manualClipHTML() + pipCardHTML(state.detail);
     initPip(state.detail);
     bindClips();
   }
@@ -1667,6 +1667,27 @@ function clipUrl(clip) {
   return `/media/${p}/clips/clip_${String(clip.idx + 1).padStart(2, "0")}.mp4?v=${Math.round(clip.updated_at || 0)}`;
 }
 
+async function loadAudioTracks(pid) {
+  const sel = $("#edAudio");
+  if (!sel) return;
+  try {
+    const data = await api(`/api/projects/${pid}/audio`);
+    const tracks = data.tracks || [];
+    if (tracks.length < 2) { sel.closest(".field").style.display = "none"; return; }
+    sel.innerHTML = tracks.map((t, i) => {
+      const lang = (t.language && t.language !== "und") ? t.language.toUpperCase() : "—";
+      const title = t.title ? ` · ${t.title}` : "";
+      return `<option value="${i}" ${i === (data.selected || 0) ? "selected" : ""}>${i + 1}. ${lang}${title}</option>`;
+    }).join("");
+    sel.addEventListener("change", async () => {
+      try {
+        await api(`/api/projects/${pid}/audio`, { method: "POST", body: JSON.stringify({ index: Number(sel.value) }) });
+        toast("Звуковая дорожка выбрана — подействует при следующем рендере");
+      } catch (e) { toast(e.message, "err"); }
+    });
+  } catch (e) { console.error(e); }
+}
+
 function openEditor(clipId) {
   const clip = state.detail.clips.find((c) => c.id === clipId);
   if (!clip) return;
@@ -1721,6 +1742,10 @@ function openEditor(clipId) {
               <select id="edAspect">
                 ${["9:16", "1:1", "16:9", "4:5"].map((a) => `<option value="${a}" ${(s.aspect || "9:16") === a ? "selected" : ""}>${a}</option>`).join("")}
               </select>
+            </div>
+            <div class="field">
+              <label>Звуковая дорожка</label>
+              <select id="edAudio"><option value="0">основная</option></select>
             </div>
             <div class="field">
               <label>Кадрирование</label>
@@ -1882,6 +1907,26 @@ function closeModal() {
   $("#modal").classList.add("hidden");
   $("#modal").innerHTML = "";
 }
+
+$("#main").addEventListener("click", async (e) => {
+  if (!e.target.closest("#mcAdd")) return;
+  if (!state.current) return;
+  const start = $("#mcStart").value.trim();
+  const end = $("#mcEnd").value.trim();
+  if (!start || !end) { toast("Укажите начало и конец", "err"); return; }
+  const btn = e.target.closest("#mcAdd");
+  btn.disabled = true;
+  try {
+    await api(`/api/projects/${state.current}/clips`, {
+      method: "POST",
+      body: JSON.stringify({ start, end, trim_silence: $("#mcTrim").checked }),
+    });
+    toast("Клип добавлен — рендерю");
+    poll();
+  } catch (err) {
+    toast(err.message, "err");
+  } finally { btn.disabled = false; }
+});
 
 $("#modal").addEventListener("click", (e) => {
   if (!e.target.closest("[data-close]")) return;
@@ -2252,6 +2297,25 @@ function bindHud() {
 }
 
 /* ---------------- Окно стримера (камера) ---------------- */
+
+function manualClipHTML() {
+  return `
+    <div class="pip-card" id="manualCard">
+      <div class="pip-head">
+        <div>
+          <div class="pip-title">Добавить по таймкоду</div>
+          <div class="pip-sub">Свой момент, мимо алгоритма. Время в формате мм:сс или секунды.</div>
+        </div>
+      </div>
+      <div class="pip-controls">
+        <input type="text" id="mcStart" placeholder="00:00" style="width:90px;padding:8px 10px;border-radius:10px;border:1px solid var(--separator);background:var(--grouped-2);color:var(--text)" />
+        <span>—</span>
+        <input type="text" id="mcEnd" placeholder="00:45" style="width:90px;padding:8px 10px;border-radius:10px;border:1px solid var(--separator);background:var(--grouped-2);color:var(--text)" />
+        <label class="toggle"><input type="checkbox" id="mcTrim" checked/><span class="track"></span><span>Подрезать тишину</span></label>
+        <button class="btn-primary" id="mcAdd" type="button">Добавить клип</button>
+      </div>
+    </div>`;
+}
 
 function pipCardHTML(detail) {
   const project = detail.project;

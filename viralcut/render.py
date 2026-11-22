@@ -32,7 +32,7 @@ def _bg_chain(w: int, h: int, focus_x: float = 0.5, sharpen: bool = False) -> st
     return (
         f"[0:v]split=2[bg][fg];"
         f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
-        f"gblur=sigma=34:steps=2,eq=brightness=-0.12:saturation=0.8[bgb];"
+        f"gblur=sigma=26:steps=2,eq=saturation=0.95[bgb];"
         f"[fg]scale={w}:-2:flags=lanczos{sharp}[fgs];"
         f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2:shortest=1[base]"
     )
@@ -71,6 +71,11 @@ def _hw_args(encoder: str, crf: int) -> List[str]:
     if encoder == "h264_nvenc":
         return ["-c:v", encoder, "-preset", "p5", "-rc", "vbr", "-cq", str(max(19, crf)),
                 "-b:v", "0", "-pix_fmt", "yuv420p"]
+    if encoder == "h264_amf":
+        # AMD: постоянное качество вместо битрейта, иначе сцены «плывут»
+        return ["-c:v", encoder, "-quality", "quality", "-rc", "cqp",
+                "-qp_i", str(crf), "-qp_p", str(crf + 2), "-pix_fmt", "yuv420p"]
+
     if encoder == "h264_qsv":
         return ["-c:v", encoder, "-global_quality", str(crf), "-pix_fmt", "nv12"]
     return ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
@@ -127,8 +132,9 @@ def hw_encoder() -> Optional[str]:
         # пользователь выбрал процессор — GPU не трогаем вовсе
         _HW_CACHE["value"] = None
         return None
-    preferred = {"darwin": ["h264_videotoolbox"], "win32": ["h264_nvenc", "h264_qsv"],
-                 "linux": ["h264_nvenc", "h264_qsv"]}.get(sys.platform, [])
+    preferred = {"darwin": ["h264_videotoolbox"],
+                 "win32": ["h264_nvenc", "h264_amf", "h264_qsv"],
+                 "linux": ["h264_nvenc", "h264_vaapi", "h264_qsv"]}.get(sys.platform, [])
     try:
         proc = run([ffmpeg(), "-hide_banner", "-encoders"])
         text = (proc.stdout or "") + (proc.stderr or "")
@@ -197,12 +203,13 @@ def _run_encode(cmd: List[str], duration: float,
     return proc.returncode, tail, (stopped[0] if stopped else None)
 
 
-def _measure_loudness(source: Path, start: float, duration: float) -> Optional[Dict[str, Any]]:
+def _measure_loudness(source: Path, start: float, duration: float,
+                      audio_track: int = 0) -> Optional[Dict[str, Any]]:
     """Первый проход loudnorm: измеряем громкость фрагмента."""
     try:
         proc = subprocess.run(
             [ffmpeg(), "-hide_banner", "-nostats", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}",
-             "-i", str(source), "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
+             "-i", str(source), "-map", f"0:a:{max(0, int(audio_track))}", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
              "-f", "null", "-"],
             capture_output=True, text=True, errors="replace",
             timeout=max(30.0, duration * 2.5),
@@ -239,7 +246,8 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                 on_progress: Optional[Callable[[float], None]] = None,
                 crf: int = 21, preset: str = "veryfast",
                 crop_path: Optional[Dict[str, Any]] = None,
-                pip: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                pip: Optional[Dict[str, Any]] = None,
+                audio_track: int = 0) -> Dict[str, Any]:
     w, h = ASPECTS.get(aspect, ASPECTS["9:16"])
     duration = max(0.4, clip_end - clip_start)
     info = probe(source)
@@ -322,12 +330,12 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
             audio_filter = "loudnorm=I=-14:TP=-1.5:LRA=11"
         fade_out = max(0.0, duration - 0.06)
         audio_filter += f",afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out:.3f}:d=0.05"
-        cmd += ["-map", "0:a:0", "-af", audio_filter,
+        cmd += ["-map", f"0:a:{max(0, int(audio_track))}", "-af", audio_filter,
                 "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
     else:
         cmd += ["-an"]
 
-    measured = _measure_loudness(source, clip_start, duration) if info["has_audio"] else None
+    measured = _measure_loudness(source, clip_start, duration, audio_track) if info["has_audio"] else None
 
     def _compose(video_args: List[str], filters: str) -> List[str]:
         """Собирает команду целиком: так откат на другой энкодер — это пересборка."""
@@ -352,7 +360,7 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                 audio_filter = "loudnorm=I=-14:TP=-1.5:LRA=11"
             fade_out = max(0.0, duration - 0.06)
             audio_filter += f",afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out:.3f}:d=0.05"
-            built += ["-map", "0:a:0", "-af", audio_filter,
+            built += ["-map", f"0:a:{max(0, int(audio_track))}", "-af", audio_filter,
                       "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
         else:
             built += ["-an"]

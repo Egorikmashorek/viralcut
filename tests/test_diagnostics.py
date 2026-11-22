@@ -213,11 +213,13 @@ class DesktopLogHelpersTest(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="vc-vendor-"))
         src = tmp / "src"
         (src / "pot" / "build").mkdir(parents=True)
-        (src / "node").write_text("#!/bin/sh\n", encoding="utf-8")
+        # на Windows бинарник называется node.exe — проверяем то же имя, что и код
+        node_name = main._node_name()
+        (src / node_name).write_text("#!/bin/sh\n", encoding="utf-8")
         (src / "pot" / "build" / "main.js").write_text("// pot\n", encoding="utf-8")
         archive = tmp / "vendor.tar.gz"
         with tarfile.open(archive, "w:gz") as tar:
-            tar.add(src / "node", arcname="node")
+            tar.add(src / node_name, arcname=node_name)
             tar.add(src / "pot", arcname="pot")
 
         dest = tmp / "runtime" / "vendor"
@@ -225,7 +227,7 @@ class DesktopLogHelpersTest(unittest.TestCase):
         main._extract_vendor(archive, dest)
         self.assertTrue(main._vendor_ready(dest))
         if not main.IS_WINDOWS:
-            self.assertTrue((dest / "node").stat().st_mode & 0o111,
+            self.assertTrue((dest / node_name).stat().st_mode & 0o111,
                             "node должен остаться исполняемым")
 
     def test_installs_faulthandler_and_excepthook(self):

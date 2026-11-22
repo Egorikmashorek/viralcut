@@ -232,6 +232,7 @@ const state = {
   pollTimer: null,
   mainKey: "",
   health: null,
+  bootDone: false,
   probeOpen: false,
   probeUrl: "",
   probeData: null,
@@ -1032,6 +1033,7 @@ function reviewHTML(project) {
     </div>
     <div class="project-actions">
       <button class="btn-primary" data-action="setup">Настроить субтитры</button>
+      <button class="btn-ghost" data-action="save-source" title="Сохранить скачанное видео в выбранную папку">${ICONS.download} Сохранить видео</button>
       <button class="btn-ghost" data-action="home">${ICONS.back} Новый</button>
       <button class="btn-ghost danger" data-action="delete">${ICONS.trash} Удалить</button>
     </div>
@@ -1065,6 +1067,7 @@ function resultsHTML() {
       ${ready.length ? `<a class="btn-primary" href="/api/projects/${project.id}/zip" data-download-zip="${project.id}" style="display:inline-flex;align-items:center;gap:7px">${ICONS.zip} Скачать всё</a>` : ""}
       <button class="btn-ghost" data-action="folder" title="Открыть папку с готовыми MP4">${ICONS.folder} Открыть папку</button>
       ${ready.length ? `<button class="btn-ghost" data-action="smart-all">Пересобрать в умный кроп</button>` : ""}
+      <button class="btn-ghost" data-action="save-source" title="Сохранить скачанное видео в выбранную папку">${ICONS.download} Сохранить видео</button>
       <button class="btn-ghost" data-action="home">${ICONS.back} Новый</button>
       <button class="btn-ghost danger" data-action="delete">${ICONS.trash} Удалить</button>
     </div>
@@ -1233,6 +1236,19 @@ $("#main").addEventListener("click", async (e) => {
       openTemplate(pid);
       schedulePoll(600);
     } catch (err) { toast(err.message, "err"); }
+    return;
+  }
+
+  if (action === "save-source") {
+    if (!state.detail) return;
+    const native = window.pywebview && window.pywebview.api;
+    if (!native || !native.save_source) { toast("Доступно в настольном приложении"); return; }
+    try {
+      const res = await native.save_source(state.detail.project.id);
+      if (res && res.ok) toast(`Сохранено: ${res.path}`);
+      else if (res && res.cancelled) { /* отмена — молчим */ }
+      else toast((res && res.error) || "Не удалось сохранить", "err");
+    } catch (e) { toast(e.message, "err"); }
     return;
   }
 
@@ -2068,12 +2084,66 @@ function bindHud() {
   try {
     if (localStorage.getItem("vcHudCollapsed") === "1") card.classList.add("collapsed");
   } catch (_) {}
-  head.addEventListener("click", () => {
+
+  // сохранённая позиция: пользователь мог перетащить панель
+  const placeHud = (x, y) => {
+    const r = card.getBoundingClientRect();
+    const left = Math.min(Math.max(8, x), Math.max(8, window.innerWidth - r.width - 8));
+    const top = Math.min(Math.max(8, y), Math.max(8, window.innerHeight - r.height - 8));
+    card.style.left = `${left}px`;
+    card.style.top = `${top}px`;
+    card.style.right = "auto";
+    card.style.bottom = "auto";
+    return { left, top };
+  };
+  const saved = (() => {
+    try { return JSON.parse(localStorage.getItem("vcHudPos") || "null"); } catch (_) { return null; }
+  })();
+  if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+    const pos = placeHud(saved.x, saved.y);
+    try { localStorage.setItem("vcHudPos", JSON.stringify({ x: pos.left, y: pos.top })); } catch (_) {}
+  }
+  window.addEventListener("resize", () => {
+    const stored = (() => {
+      try { return JSON.parse(localStorage.getItem("vcHudPos") || "null"); } catch (_) { return null; }
+    })();
+    if (stored && Number.isFinite(stored.x)) placeHud(stored.x, stored.y);
+  });
+
+  let drag = null;
+  head.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    const r = card.getBoundingClientRect();
+    drag = { offX: e.clientX - r.left, offY: e.clientY - r.top, moved: false,
+             startX: e.clientX, startY: e.clientY };
+    card.classList.add("dragging");
+    try { head.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  head.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    if (!drag.moved && Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < 4) return;
+    drag.moved = true;
+    placeHud(e.clientX - drag.offX, e.clientY - drag.offY);
+  });
+  const finish = (e) => {
+    if (!drag) return;
+    const moved = drag.moved;
+    drag = null;
+    card.classList.remove("dragging");
+    try { head.releasePointerCapture(e.pointerId); } catch (_) {}
+    if (moved) {
+      const r = card.getBoundingClientRect();
+      try { localStorage.setItem("vcHudPos", JSON.stringify({ x: r.left, y: r.top })); } catch (_) {}
+      return;
+    }
+    // это был клик, а не перетаскивание — сворачиваем
     card.classList.toggle("collapsed");
     try {
       localStorage.setItem("vcHudCollapsed", card.classList.contains("collapsed") ? "1" : "0");
     } catch (_) {}
-  });
+  };
+  head.addEventListener("pointerup", finish);
+  head.addEventListener("pointercancel", finish);
 }
 
 function bindUpdateCard() {
@@ -2106,21 +2176,91 @@ window.addEventListener("hashchange", () => {
   }
 });
 
+/* ---------------- Надёжный старт ---------------- */
+
+function showFatal(message, details) {
+  const main = $("#main");
+  if (!main) return;
+  main.innerHTML = `
+    <div class="fatal-box">
+      <div class="fatal-title">Интерфейс не загрузился</div>
+      <p class="fatal-text">${esc(message)}</p>
+      ${details ? `<pre class="fatal-details">${esc(details)}</pre>` : ""}
+      <div class="fatal-actions">
+        <button class="btn-primary" id="fatalReload">Перезагрузить</button>
+        <button class="btn-ghost" id="fatalCopy">Скопировать ошибку</button>
+      </div>
+      <p class="fatal-hint">Если не помогает — закройте приложение и откройте заново. Файл лога: в папке данных ViralCut, app.log.</p>
+    </div>`;
+  const reload = $("#fatalReload");
+  if (reload) reload.addEventListener("click", () => location.reload());
+  const copy = $("#fatalCopy");
+  if (copy) copy.addEventListener("click", () => {
+    const text = `${message}\n${details || ""}`;
+    try { navigator.clipboard.writeText(text); toast("Ошибка скопирована"); }
+    catch (_) { toast("Не удалось скопировать", "err"); }
+  });
+}
+
+window.addEventListener("error", (event) => {
+  if (state.bootDone) return;
+  showFatal("Ошибка в скрипте приложения", String(event.message || event.error || ""));
+});
+window.addEventListener("unhandledrejection", (event) => {
+  if (state.bootDone) return;
+  showFatal("Не удалось загрузить данные", String((event.reason && event.reason.message) || event.reason || ""));
+});
+
+async function withRetry(fn, tries = 4, delay = 500) {
+  let lastError = null;
+  for (let i = 0; i < tries; i += 1) {
+    try { return await fn(); } catch (err) { lastError = err; await new Promise((r) => setTimeout(r, delay)); }
+  }
+  throw lastError;
+}
+
 (async function boot() {
-  bindUpdateCard();
-  bindHud();
-  pollSystem();
-  setInterval(pollSystem, 2000);
-  checkUpdates();
-  setInterval(checkUpdates, 30 * 60 * 1000);
-  await checkHealth();
-  await loadFontCatalog();
-  await loadProjects();
-  const hash = location.hash.replace("#", "");
-  if (hash && state.projects.some((p) => p.id === hash)) {
-    openProject(hash);
-  } else {
-    renderMain(true);
+  // каждый шаг изолирован: падение одного не должно оставлять пустой экран
+  const watchdog = setTimeout(() => {
+    if (!state.bootDone) showFatal("Интерфейс не загрузился за 12 секунд",
+      "Сервер мог не ответить. Проверьте, что не блокирует антивирус/файрвол.");
+  }, 12000);
+
+  try { bindUpdateCard(); } catch (e) { console.error(e); }
+  try { $("#settingsBtn")?.addEventListener("click", openSettings); } catch (e) { console.error(e); }
+  try { bindHud(); } catch (e) { console.error(e); }
+  try { pollSystem(); setInterval(pollSystem, 2000); } catch (e) { console.error(e); }
+  try { checkUpdates(); setInterval(checkUpdates, 30 * 60 * 1000); } catch (e) { console.error(e); }
+
+  try {
+    await withRetry(() => checkHealth(), 5, 700);
+  } catch (e) {
+    console.error(e);
+  }
+
+  try { await loadFontCatalog(); } catch (e) { console.error(e); }
+
+  try {
+    await withRetry(() => loadProjects(), 4, 600);
+  } catch (e) {
+    clearTimeout(watchdog);
+    showFatal("Не удалось получить список проектов", String((e && e.message) || e));
+    return;
+  }
+
+  state.bootDone = true;
+  clearTimeout(watchdog);
+
+  try {
+    const hash = location.hash.replace("#", "");
+    if (hash && state.projects.some((p) => p.id === hash)) {
+      openProject(hash);
+    } else {
+      renderMain(true);
+    }
+  } catch (e) {
+    console.error(e);
+    showFatal("Не удалось отрисовать экран", String((e && e.stack) || e));
   }
   setInterval(checkHealth, 20000);
 })();

@@ -687,7 +687,8 @@ def _extract_direct_audio(url: str, dest_dir: Path, progress: ProgressCb = None)
     cmd = [ffmpeg(), "-y", "-v", "error", "-rw_timeout", "30000000", "-i", url,
            "-vn", "-ac", "1", "-ar", "16000",
            "-c:a", "aac", "-b:a", "96k", str(out)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=1800)
+    proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
+                          timeout=1800, **subprocess_kwargs())
     if proc.returncode != 0 or not out.exists() or out.stat().st_size < 5000:
         raise DownloadError("Не удалось получить звук: " + (proc.stderr or "")[-300:])
     if progress:
@@ -790,7 +791,8 @@ def _probe_dims(path: Path) -> Dict[str, Any]:
     """Ширина/высота файла без полного ffprobe-парсинга (ffmpeg -i в stderr)."""
     try:
         proc = subprocess.run([ffmpeg(), "-hide_banner", "-i", str(path)],
-                              capture_output=True, text=True, errors="replace", timeout=20)
+                              capture_output=True, text=True, errors="replace", timeout=20,
+                              **subprocess_kwargs())
         text = proc.stderr or ""
         m = re.search(r"Video:\s+\w+.*?,\s+(\d{2,5})x(\d{2,5})", text)
         if m:
@@ -817,7 +819,7 @@ def _cut_direct_section(url: str, dest_dir: Path, start: float, end: float,
            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out)]
     proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
-                          timeout=max(120.0, duration * 6))
+                          timeout=max(120.0, duration * 6), **subprocess_kwargs())
     if proc.returncode != 0 or not out.exists() or out.stat().st_size < 10000:
         raise DownloadError("Не удалось вырезать фрагмент: " + (proc.stderr or "")[-300:])
     if progress:

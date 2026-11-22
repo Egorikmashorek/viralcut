@@ -158,6 +158,48 @@ class DesktopApi:
         except Exception:
             pass
 
+    def choose_folder(self, current: str = "") -> Dict[str, Any]:
+        """Диалог выбора папки: пользователь сам решает, куда сохранять."""
+        try:
+            import webview
+
+            windows = getattr(webview, "windows", None) or []
+            if not windows:
+                return {"ok": False, "unavailable": True}
+            start = current if current and Path(current).is_dir() else str(Path.home())
+            chosen = windows[0].create_file_dialog(webview.FOLDER_DIALOG, directory=start)
+        except Exception as exc:  # noqa: BLE001
+            print(f"folder dialog failed: {exc}", flush=True)
+            return {"ok": False, "unavailable": True}
+        if not chosen:
+            return {"ok": False, "cancelled": True}
+        value = chosen[0] if isinstance(chosen, (list, tuple)) else chosen
+        return {"ok": True, "path": str(value)}
+
+    def save_source(self, project_id: str) -> Dict[str, Any]:
+        """Сохранить скачанный исходник в выбранную папку."""
+        from viralcut import db
+
+        project = db.get_project(project_id)
+        if not project:
+            return {"ok": False, "error": "Проект не найден"}
+        source = project.get("source")
+        if not source or not Path(source).exists():
+            return {"ok": False, "error": "Исходник ещё не скачан"}
+        src = Path(source)
+        name = self._safe(project.get("title") or src.stem) + src.suffix
+        target = self._ask_target(name)
+        if target is None:
+            return {"ok": False, "cancelled": True}
+        if target == "unavailable":
+            return {"ok": False, "error": "Диалог сохранения недоступен"}
+        dest = target if target.suffix else target.with_suffix(src.suffix)
+        dest = self._unique(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+        self._reveal(dest)
+        return {"ok": True, "path": str(dest), "folder": str(dest.parent)}
+
     def save_clip(self, clip_id: str) -> Dict[str, Any]:
         from viralcut import db
 
@@ -168,12 +210,19 @@ class DesktopApi:
         if not src.exists():
             return {"ok": False, "error": "Файл клипа не найден на диске"}
         name = f"{clip.get('idx', 0) + 1:02d}_{self._safe(clip.get('title') or 'clip')}.mp4"
-        # VIRALCUT_ASK_SAVE=0 — сохранять молча в Загрузки/ViralCut (пакетный экспорт).
-        target = self._ask_target(name) if self._ask_enabled() else "unavailable"
+        from viralcut import settings as app_settings
+
+        conf = app_settings.get()
+        preset_dir = conf.get("clips_dir") or ""
+        ask = self._ask_enabled() and (conf.get("ask_folder", True) or not preset_dir)
+        # VIRALCUT_ASK_SAVE=0 — сохранять молча (пакетный экспорт).
+        target = self._ask_target(name) if ask else "unavailable"
         if target is None:
             return {"ok": False, "cancelled": True}
         if target == "unavailable":
-            dest = self._unique(self._downloads() / name)
+            base = Path(preset_dir) if preset_dir else self._downloads()
+            base.mkdir(parents=True, exist_ok=True)
+            dest = self._unique(base / name)
         else:
             dest = target if target.suffix.lower() == ".mp4" else target.with_suffix(".mp4")
             dest = self._unique(dest)
@@ -199,7 +248,9 @@ class DesktopApi:
         if target is None:
             return {"ok": False, "cancelled": True}
         if target == "unavailable":
-            dest = self._unique(self._downloads() / name)
+            base = Path(preset_dir) if preset_dir else self._downloads()
+            base.mkdir(parents=True, exist_ok=True)
+            dest = self._unique(base / name)
         else:
             dest = target if target.suffix.lower() == ".zip" else target.with_suffix(".zip")
             dest = self._unique(dest)

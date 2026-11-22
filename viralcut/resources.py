@@ -81,6 +81,17 @@ def wrap_nice(cmd: List[str]) -> List[str]:
     return ["nice", "-n", str(level)] + cmd
 
 
+def spawn_kwargs() -> Dict[str, Any]:
+    """Флаги запуска дочернего процесса: на Windows без окна консоли.
+
+    Каждый Popen без CREATE_NO_WINDOW открывает мигающее чёрное окно — именно
+    это видели на Windows 10, когда виджет каждые 2 секунды опрашивал нагрузку.
+    """
+    if sys.platform == "win32":
+        return {"creationflags": 0x08000000}  # CREATE_NO_WINDOW
+    return {}
+
+
 def subprocess_kwargs() -> Dict[str, Any]:
     """Аргументы Popen: без окна на Windows и с пониженным приоритетом."""
     import subprocess as _sp

@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import custom_fonts, db, jobs, pipeline, render, resources, system_stats, transcribe
+from . import custom_fonts, db, jobs, pipeline, render, resources, settings as app_settings, system_stats, transcribe
 from ._version import __version__
 from .config import ASSETS_DIR, DATA_DIR, PROJECTS_DIR, WEB_DIR, ffmpeg
 
@@ -22,6 +22,13 @@ class ProjectIn(BaseModel):
     url: str
     options: Dict[str, Any] = {}
     prepare_only: bool = False
+
+
+class SettingsIn(BaseModel):
+    encoder: Optional[str] = None
+    download_dir: Optional[str] = None
+    clips_dir: Optional[str] = None
+    ask_folder: Optional[bool] = None
 
 
 class UpdateSettingsIn(BaseModel):
@@ -82,6 +89,10 @@ async def _lifespan(_app: FastAPI):
     db.init_db()
     db.reset_stale_jobs()
     custom_fonts.sync()
+    # пробный кадр GPU — в фоне: /api/health не должен ждать энкодер
+    import threading as _threading
+
+    _threading.Thread(target=render.hw_encoder, name="hw-probe", daemon=True).start()
     yield
 
 
@@ -96,7 +107,9 @@ async def _static_cache_headers(request, call_next):
     response = await call_next(request)
     path = request.url.path
     if path.startswith(("/fonts/", "/userfonts/", "/static/")):
-        response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+        # index/JS должны перепроверяться: иначе после обновления WebView2
+        # поднимает старый закешированный app.js и экран остаётся пустым
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
     return response
 
 
@@ -153,11 +166,33 @@ def health() -> Dict[str, Any]:
         "ffmpeg": ok_ffmpeg,
         "whisper": transcribe.model_available(),
         "model": transcribe.model_cached(),
-        # диагностика рендера: железо или CPU (у части машин hw-энкодер не работает)
-        "hw": render.hw_encoder(),
+        # диагностика рендера: только из кэша, чтобы не тормозить интерфейс
+        # пробным кадром GPU (на Windows без NVENC это секунды ожидания)
+        "hw": render.hw_cached(),
         "limits": resources.summary(),
         "projects": db.count_projects(),
     }
+
+
+@app.get("/api/settings")
+def settings_get() -> Dict[str, Any]:
+    from . import settings as app_settings
+
+    data = app_settings.get()
+    data["hw_available"] = render.hw_encoder()
+    return data
+
+
+@app.post("/api/settings")
+def settings_set(body: SettingsIn) -> Dict[str, Any]:
+    from . import settings as app_settings
+
+    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    data = app_settings.update(patch)
+    # выбор энкодера применяем сразу: кэш пробного кадра сбрасываем
+    render._HW_CACHE.clear()
+    data["hw_available"] = render.hw_encoder()
+    return data
 
 
 @app.get("/api/system")

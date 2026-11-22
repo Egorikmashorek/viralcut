@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import threading
 import time
@@ -191,7 +192,32 @@ def _download_phase(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
                   "fallback": meta.get("fallback"),
                   "fallback_reason": meta.get("fallback_reason"),
                   "uploader": meta.get("uploader"), "extractor": meta.get("extractor")})
+    _copy_to_download_dir(source, meta.get("title") or project.get("title") or source.stem)
     return source
+
+
+def _copy_to_download_dir(source: Path, title: str) -> None:
+    """Копирует скачанный исходник в папку, которую выбрал пользователь."""
+    try:
+        from . import settings as app_settings
+
+        target_dir = app_settings.get().get("download_dir") or ""
+        if not target_dir:
+            return
+        dest_dir = Path(target_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^\w\-. ]+", " ", str(title)).strip()[:80] or source.stem
+        dest = dest_dir / f"{safe}{source.suffix}"
+        index = 1
+        while dest.exists():
+            dest = dest_dir / f"{safe} ({index}){source.suffix}"
+            index += 1
+        if dest.resolve() == source.resolve():
+            return
+        shutil.copy2(source, dest)
+        print(f"[download] исходник сохранён: {dest}", file=sys.stderr, flush=True)
+    except Exception as exc:  # noqa: BLE001 — копия не должна ломать обработку
+        print(f"[download] не удалось скопировать исходник: {exc}", file=sys.stderr, flush=True)
 
 
 def _clip_settings(opts: Dict[str, Any]) -> Dict[str, Any]:

@@ -100,6 +100,20 @@ def _hw_works(encoder: str) -> bool:
     return ok
 
 
+def _encoder_mode() -> str:
+    try:
+        from . import settings
+
+        return settings.encoder_mode()
+    except Exception:  # noqa: BLE001
+        return "auto"
+
+
+def hw_cached() -> Optional[str]:
+    """Только из кэша: не запускает пробный кадр (для /api/health)."""
+    return _HW_CACHE.get("value")
+
+
 def hw_encoder() -> Optional[str]:
     """Аппаратный энкодер для быстрого рендера: videotoolbox / nvenc / qsv.
 
@@ -108,9 +122,9 @@ def hw_encoder() -> Optional[str]:
     """
     if "value" in _HW_CACHE:
         return _HW_CACHE["value"]
-    # GPU по умолчанию: аппаратный энкодер разгружает процессор, а качество
-    # выставлено по замеру (q=75 ≈ libx264 CRF19). Отключается VIRALCUT_HW_ENCODE=0.
-    if os.environ.get("VIRALCUT_HW_ENCODE", "auto").strip().lower() in ("0", "false", "no", "off"):
+    mode = _encoder_mode()
+    if mode == "cpu":
+        # пользователь выбрал процессор — GPU не трогаем вовсе
         _HW_CACHE["value"] = None
         return None
     preferred = {"darwin": ["h264_videotoolbox"], "win32": ["h264_nvenc", "h264_qsv"],
@@ -121,6 +135,9 @@ def hw_encoder() -> Optional[str]:
     except Exception:
         text = ""
     found = next((name for name in preferred if name in text and _hw_works(name)), None)
+    if mode == "gpu" and not found:
+        print("[render] выбран GPU, но аппаратный энкодер недоступен — остаюсь на CPU",
+              file=sys.stderr, flush=True)
     _HW_CACHE["value"] = found
     return found
 

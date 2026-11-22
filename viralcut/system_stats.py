@@ -18,9 +18,23 @@ import re
 import subprocess
 import sys
 import time
+import sys as _sys
+
 from typing import Any, Dict, List, Optional, Tuple
 
 _CACHE: Dict[str, Any] = {}
+_GPU_CACHE: Dict[str, Any] = {"value": None, "ts": 0.0}
+_MEM_CACHE: Dict[str, Any] = {"value": None, "ts": 0.0}
+
+
+def _spawn() -> Dict[str, Any]:
+    """Флаги запуска без консольного окна (Windows)."""
+    try:
+        from . import resources
+
+        return resources.spawn_kwargs()
+    except Exception:  # noqa: BLE001
+        return {"creationflags": 0x08000000} if _sys.platform == "win32" else {}
 _LAST_CPU: List[Tuple[float, float]] = []
 _LAST_VALUE: List[float] = [0.0]
 _LAST_TS: List[float] = [0.0]
@@ -135,14 +149,24 @@ def cpu_percent(force: bool = False) -> Optional[float]:
 
 # --- Память ------------------------------------------------------------------
 
-def memory() -> Dict[str, Any]:
+def memory(force: bool = False) -> Dict[str, Any]:
+    now = time.monotonic()
+    if not force and _MEM_CACHE["value"] and now - _MEM_CACHE["ts"] < 1.0:
+        return dict(_MEM_CACHE["value"])
+    result = _memory_uncached()
+    _MEM_CACHE["value"] = result
+    _MEM_CACHE["ts"] = now
+    return dict(result)
+
+
+def _memory_uncached() -> Dict[str, Any]:
     total = 0
     used = 0
     if sys.platform == "darwin":
         try:
             total = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True,
-                                       text=True, timeout=3).stdout.strip() or 0)
-            out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=3).stdout
+                                       text=True, timeout=3, **_spawn()).stdout.strip() or 0)
+            out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=3, **_spawn()).stdout
             page = 16384
             m = re.search(r"page size of (\d+) bytes", out)
             if m:
@@ -196,10 +220,10 @@ def memory() -> Dict[str, Any]:
 def _gpu_macos() -> Dict[str, Any]:
     try:
         out = subprocess.run(["ioreg", "-r", "-d", "1", "-w", "0", "-c", "AGXAccelerator"],
-                             capture_output=True, text=True, timeout=4).stdout
+                             capture_output=True, text=True, timeout=4, **_spawn()).stdout
         if not out:
             out = subprocess.run(["ioreg", "-r", "-d", "1", "-w", "0", "-c", "IOAccelerator"],
-                                 capture_output=True, text=True, timeout=4).stdout
+                                 capture_output=True, text=True, timeout=4, **_spawn()).stdout
         m = re.search(r'"Device Utilization %"=(\d+)', out)
         if not m:
             return {"percent": None, "name": "Apple GPU"}
@@ -217,7 +241,7 @@ def _gpu_nvidia() -> Dict[str, Any]:
     try:
         out = subprocess.run([exe, "--query-gpu=utilization.gpu,memory.used,memory.total,name",
                               "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=4)
+                             capture_output=True, text=True, timeout=4, **_spawn())
         if out.returncode != 0 or not out.stdout.strip():
             return {"percent": None, "name": ""}
         first = out.stdout.strip().splitlines()[0]
@@ -227,12 +251,20 @@ def _gpu_nvidia() -> Dict[str, Any]:
         return {"percent": None, "name": ""}
 
 
-def gpu() -> Dict[str, Any]:
+def gpu(force: bool = False) -> Dict[str, Any]:
+    """Видеокарта с кэшем на 1.5 с: на Windows каждый вызов — это nvidia-smi."""
+    now = time.monotonic()
+    if not force and _GPU_CACHE["value"] and now - _GPU_CACHE["ts"] < 1.5:
+        return dict(_GPU_CACHE["value"])
     if sys.platform == "darwin":
-        return _gpu_macos()
-    if sys.platform in ("win32", "linux"):
-        return _gpu_nvidia()
-    return {"percent": None, "name": ""}
+        result = _gpu_macos()
+    elif sys.platform in ("win32", "linux"):
+        result = _gpu_nvidia()
+    else:
+        result = {"percent": None, "name": ""}
+    _GPU_CACHE["value"] = result
+    _GPU_CACHE["ts"] = now
+    return dict(result)
 
 
 def active_job(projects: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

@@ -412,7 +412,19 @@ def project_retry(pid: str, body: RetryIn = RetryIn()) -> Dict[str, Any]:
         pipeline.request_cancel(pid)
     options = dict(project.get("options") or {})
     options["force_hd"] = bool(body.force_hd)
+    if body.force_hd:
+        # HD-повтор всегда целится в 1080p, даже если проект создавали в 360p
+        options["max_height"] = max(1080, int(options.get("max_height") or 0))
     pipeline.clear_cancel(pid)
+    meta = project.get("meta") or {}
+    if body.force_hd and meta.get("segments_mode"):
+        # моменты уже найдены: не тратим время на повторное распознавание,
+        # просто заново скачиваем фрагменты в 1080p и рендерим
+        db.reset_clips_pending(pid)
+        db.update_project(pid, status="queued", stage="Готовлю HD-версии клипов",
+                          progress=0, error=None, options=options)
+        jobs.submit_process(pid)
+        return db.get_project(pid) or project
     db.clear_clips(pid)
     db.update_project(pid, status="queued", stage="В очереди", progress=0, error=None,
                       options=options)

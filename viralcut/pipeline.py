@@ -167,7 +167,7 @@ def _download_phase(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
                     progress=lambda p, st: progress(p * 0.9, st),
                     browser=opts.get("cookies_browser") or None,
                     force_hd=opts.get("force_hd", False),
-                    max_height=int(opts.get("max_height", 1080)),
+                    max_height=1080 if opts.get("force_hd") else int(opts.get("max_height", 1080)),
                 )
         except downloader.DownloadError as exc:
             raise RuntimeError(str(exc)) from exc
@@ -298,7 +298,8 @@ def _process_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
             part = downloader.download_section(
                 project["url"], sections / clip["id"], sec_start, sec_end,
                 progress=sub_progress, browser=opts.get("cookies_browser") or None,
-                max_height=int(opts.get("max_height", 1080)),
+                # пересборка в HD забирает фрагменты в 1080p, а не в 360
+                max_height=1080 if opts.get("force_hd") else int(opts.get("max_height", 1080)),
             )
             actual = utils.media_duration(part)
             offset = max(0.0, float(clip["start"]) - sec_start)

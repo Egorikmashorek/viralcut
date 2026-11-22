@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import ffmpeg
 from . import custom_fonts
+from . import reframe as _reframe
 from .reframe import crop_expressions
 from .utils import MediaError, probe, run, subprocess_kwargs
 
@@ -106,7 +107,9 @@ def hw_encoder() -> Optional[str]:
     """
     if "value" in _HW_CACHE:
         return _HW_CACHE["value"]
-    if os.environ.get("VIRALCUT_HW_ENCODE", "auto").strip().lower() in ("0", "false", "no", "off"):
+    # По умолчанию CPU: замер показал, что videotoolbox не быстрее (фильтры
+    # съедают всё), но даёт фиксированный битрейт и хуже держит сложные сцены.
+    if os.environ.get("VIRALCUT_HW_ENCODE", "0").strip().lower() not in ("1", "auto", "true", "yes"):
         _HW_CACHE["value"] = None
         return None
     preferred = {"darwin": ["h264_videotoolbox"], "win32": ["h264_nvenc", "h264_qsv"],
@@ -222,28 +225,31 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
     duration = max(0.4, clip_end - clip_start)
     info = probe(source)
     if info["height"] >= 1000:
-        crf = min(crf, 20)
+        crf = min(crf, 19)
         preset = "veryfast"
 
-    sharpen = info["width"] < w * 0.75
-    if mode == "auto" and crop_path:
-        sharpen = float(crop_path.get("crop_w", info["width"])) < w * 1.15
-        parts = [_auto_chain(w, h, crop_path, sharpen)]
-    elif mode == "blur":
-        parts = [_bg_chain(w, h, focus_x, sharpen)]
-    else:
-        parts = [_crop_chain(w, h, focus_x, sharpen=sharpen)]
-    if ass_path is not None:
-        parts.append(
-            f"[base]ass=filename='{_esc(ass_path)}':fontsdir='{_esc(custom_fonts.libass_dir())}':alpha=1,"
-            f"format=yuv420p[v]"
-        )
-        vlabel = "[v]"
-    else:
-        parts.append("[base]scale=in_range=auto:out_range=tv,format=yuv420p[v]")
-        vlabel = "[v]"
+    sharpen_base = info["width"] < w * 0.75
 
-    filter_complex = ";".join(parts)
+    def _build_filters(path_used: Optional[Dict[str, Any]]) -> str:
+        sharp = sharpen_base
+        if mode == "auto" and path_used:
+            sharp = float(path_used.get("crop_w", info["width"])) < w * 1.15
+            parts = [_auto_chain(w, h, path_used, sharp)]
+        elif mode == "blur" or (mode == "auto" and not path_used):
+            parts = [_bg_chain(w, h, focus_x, sharp)]
+        else:
+            parts = [_crop_chain(w, h, focus_x, sharpen=sharp)]
+        if ass_path is not None:
+            parts.append(
+                f"[base]ass=filename='{_esc(ass_path)}':fontsdir='{_esc(custom_fonts.libass_dir())}':alpha=1,"
+                f"format=yuv420p[v]"
+            )
+        else:
+            parts.append("[base]scale=in_range=auto:out_range=tv,format=yuv420p[v]")
+        return ";".join(parts)
+
+    vlabel = "[v]"
+    filter_complex = _build_filters(crop_path if mode == "auto" else None)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [ffmpeg(), "-y", "-hide_banner", "-v", "error", "-nostats",
@@ -271,12 +277,12 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
 
     measured = _measure_loudness(source, clip_start, duration) if info["has_audio"] else None
 
-    def _compose(video_args: List[str]) -> List[str]:
+    def _compose(video_args: List[str], filters: str) -> List[str]:
         """Собирает команду целиком: так откат на другой энкодер — это пересборка."""
         built = [ffmpeg(), "-y", "-hide_banner", "-v", "error", "-nostats",
                  "-progress", "pipe:1",
                  "-ss", f"{clip_start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)]
-        built += ["-filter_complex", filter_complex, "-map", vlabel]
+        built += ["-filter_complex", filters, "-map", vlabel]
         if info["has_audio"]:
             if measured:
                 audio_filter = (
@@ -297,13 +303,21 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
         return built
 
     hw = hw_encoder()
-    plan: List[Optional[str]] = ([hw] if hw else []) + [None]
+    attempts: List[Tuple[Optional[str], Optional[Dict[str, Any]]]] = []
+    if hw:
+        attempts.append((hw, crop_path))
+    attempts.append((None, crop_path))
+    if crop_path:
+        # если ffmpeg не переварил длинное выражение кадрирования — грубый путь
+        attempts.append((None, _reframe._coarse_path(crop_path)))
+        attempts.append((None, None))
     tail_text = ""
     stop_reason: Optional[str] = None
     code = 1
-    for attempt, encoder in enumerate(plan):
+    for attempt, (encoder, path_used) in enumerate(attempts):
         out_path.unlink(missing_ok=True)
-        cmd = _compose(_video_args(encoder, crf, preset))
+        filters = _build_filters(path_used if mode == "auto" else None)
+        cmd = _compose(_video_args(encoder, crf, preset), filters)
         code, tail, stop_reason = _run_encode(cmd, duration, on_progress if attempt == 0 else None)
         tail_text = "".join(tail)
         if stop_reason:
@@ -313,6 +327,9 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
         if encoder is not None:
             # железо не справилось — повторяем на CPU, не ломая команду
             print(f"[render] {encoder} не сработал, повтор на libx264", file=sys.stderr, flush=True)
+        elif path_used is not None:
+            print("[render] выражение кадрирования отвергнуто, повторю с упрощённым путём",
+                  file=sys.stderr, flush=True)
 
     if stop_reason:
         out_path.unlink(missing_ok=True)

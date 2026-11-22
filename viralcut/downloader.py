@@ -642,16 +642,13 @@ def probe(url: str, browser: Optional[str] = None) -> Dict[str, Any]:
     if not options:
         raise DownloadError("Не удалось получить форматы видео.")
 
-    recommended = 1080
-    if duration > 5400:
-        recommended = 360
-    elif duration > 3600:
-        recommended = 720
-    elif options and options[0]["size_mb"] > 900:
-        recommended = 720 if len(options) > 1 else options[0]["height"]
-    available = {o["height"] for o in options}
-    if recommended not in available:
-        recommended = min(available, key=lambda h: abs(h - recommended))
+    # Качество — приоритет: рекомендуем лучшее доступное (до 1080p).
+    # Раньше для длинных видео предлагался 360p «чтобы быстрее», и люди
+    # случайно получали мыльные клипы. Экономия трафика — это «Экономно»,
+    # а не снижение разрешения.
+    available = {int(o["height"]) for o in options if o.get("height")}
+    up_to_hd = [h for h in available if h <= 1080]
+    recommended = max(up_to_hd) if up_to_hd else max(available)
 
     for o in options:
         o["recommended"] = o["height"] == recommended

@@ -205,25 +205,43 @@ def _rdp(times: List[float], values: List[float], tolerance: float) -> List[int]
 
 
 def _simplify_path(times: List[float], xs: List[float], ys: List[float],
-                   max_points: int = 140) -> Tuple[List[float], List[float], List[float]]:
-    """Сжимает путь до допустимого числа keyframe.
+                   max_points: int = 60) -> Tuple[List[float], List[float], List[float]]:
+    """Сжимает путь до безопасного числа keyframe.
 
-    ffmpeg парсит выражение целиком: при ~200+ слагаемых он падает с
-    «Missing ')' or too many args», и рендер умирает. Дуглас–Пекер оставляет
-    только точки, без которых форма пути меняется заметнее допуска, поэтому
-    плавное движение описывается десятками точек, а не сотнями.
+    ffmpeg парсит выражение целиком: примерно после 2000 символов он падает с
+    «Missing ')' or too many args», и рендер умирает. Каждое слагаемое — около
+    26 символов, поэтому держим ≤60 точек (≈1.5 КБ). Дуглас–Пекер при этом
+    сохраняет форму с точностью в пару пикселей, а движение остаётся плавным:
+    между точками ffmpeg интерполирует линейно, а сама кривая уже сглажена.
     """
-    if len(times) <= 3:
+    n = len(times)
+    if n <= 3:
         return times, xs, ys
     tol = 0.6
-    for _ in range(6):
+    for _ in range(8):
         idx = sorted(set(_rdp(times, xs, tol)) | set(_rdp(times, ys, tol)))
         if len(idx) <= max_points:
             return [times[i] for i in idx], [xs[i] for i in idx], [ys[i] for i in idx]
-        tol *= 1.8
-    step = max(1, len(times) // max_points)
-    idx = list(range(0, len(times), step)) + [len(times) - 1]
+        tol *= 1.7
+    # даже грубый допуск не помог — равномерно прореживаем
+    step = max(1, (n - 1) // max(2, max_points - 1))
+    idx = list(range(0, n, step))
+    if idx[-1] != n - 1:
+        idx.append(n - 1)
     return [times[i] for i in idx], [xs[i] for i in idx], [ys[i] for i in idx]
+
+
+def _coarse_path(path: Dict[str, Any], max_points: int = 18) -> Dict[str, Any]:
+    """Аварийный вариант пути: редкие точки. Нужен, если ffmpeg всё же отказался."""
+    times = path["times"]
+    if len(times) <= max_points:
+        return path
+    step = max(1, math.ceil((len(times) - 1) / (max_points - 1)))
+    idx = list(range(0, len(times), step))[:max_points]
+    if idx[-1] != len(times) - 1:
+        idx[-1] = len(times) - 1
+    return {**path, "times": [times[i] for i in idx],
+            "x": [path["x"][i] for i in idx], "y": [path["y"][i] for i in idx]}
 
 
 def build_crop_path(source: Path, start: float, end: float, aspect: str = "9:16",

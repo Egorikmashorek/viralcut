@@ -786,8 +786,23 @@ def download_audio(url: str, dest_dir: Path, progress: ProgressCb = None,
     }
 
 
+def _probe_dims(path: Path) -> Dict[str, Any]:
+    """Ширина/высота файла без полного ffprobe-парсинга (ffmpeg -i в stderr)."""
+    try:
+        proc = subprocess.run([ffmpeg(), "-hide_banner", "-i", str(path)],
+                              capture_output=True, text=True, errors="replace", timeout=20)
+        text = proc.stderr or ""
+        m = re.search(r"Video:\s+\w+.*?,\s+(\d{2,5})x(\d{2,5})", text)
+        if m:
+            return {"width": int(m.group(1)), "height": int(m.group(2))}
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
 def _cut_direct_section(url: str, dest_dir: Path, start: float, end: float,
-                        progress: ProgressCb = None, max_height: int = 1080) -> Path:
+                        progress: ProgressCb = None, max_height: int = 1080,
+                        quality: Optional[Dict[str, Any]] = None) -> Path:
     """Вырезает фрагмент из прямого HTTP/локального файла без yt-dlp."""
     from .config import ffmpeg
 
@@ -807,12 +822,17 @@ def _cut_direct_section(url: str, dest_dir: Path, start: float, end: float,
         raise DownloadError("Не удалось вырезать фрагмент: " + (proc.stderr or "")[-300:])
     if progress:
         progress(0.99, "Фрагмент готов")
+    if quality is not None:
+        info = _probe_dims(out)
+        quality["height"] = int(info.get("height") or 0)
+        quality["label"] = "direct"
     return out
 
 
 def download_section(url: str, dest_dir: Path, start: float, end: float,
                      progress: ProgressCb = None, browser: Optional[str] = None,
-                     max_height: int = 1080) -> Path:
+                     max_height: int = 1080,
+                     quality: Optional[Dict[str, Any]] = None) -> Path:
     """Скачивает только фрагмент видео (для экономного режима).
 
     Прямые ссылки на файл режем локальным ffmpeg: yt-dlp с `download_ranges` на
@@ -825,7 +845,7 @@ def download_section(url: str, dest_dir: Path, start: float, end: float,
     ensure_path()
     dest_dir.mkdir(parents=True, exist_ok=True)
     if is_direct_media(url):
-        return _cut_direct_section(url, dest_dir, start, end, progress, max_height)
+        return _cut_direct_section(url, dest_dir, start, end, progress, max_height, quality)
     outtmpl = str(dest_dir / "section.%(ext)s")
     if max_height <= 360:
         fmt = FORMAT_SD
@@ -850,12 +870,25 @@ def download_section(url: str, dest_dir: Path, start: float, end: float,
         elif d.get("status") == "finished" and progress:
             progress(0.99, "Момент скачан · рендер")
 
-    formats = [fmt]
+    # HD сначала двумя наборами клиентов: на YouTube второй запрос часто
+    # отваливается по троттлингу, и раньше это молча уходило в 360p —
+    # из-за этого первый клип был хороший, а остальные мыльные.
+    attempts: List[tuple] = []
     if is_youtube(url):
-        formats.append(FORMAT_SD)
+        if _pot_enabled():
+            attempts.append(("HD · PO-token", fmt,
+                             {"player_client": ["mweb", "web"], "fetch_pot": ["always"]}, True))
+            attempts.append(("HD · android", fmt, {"player_client": ["android", "tv"]}, False))
+        else:
+            attempts.append(("HD · android", fmt, {"player_client": ["android", "tv"]}, False))
+            attempts.append(("HD · ios", fmt, {"player_client": ["ios"]}, False))
+        attempts.append(("SD", FORMAT_SD, {"player_client": ["android", "tv"]}, False))
+    else:
+        attempts.append(("HD", fmt, None, False))
 
+    min_ok = max(360, min(720, int(max_height * 0.8)))
     last_error: Optional[Exception] = None
-    for fi, fmt_try in enumerate(formats):
+    for fi, (label, fmt_try, clients, use_pot) in enumerate(attempts):
         _clean_partials(dest_dir)
         opts: Dict[str, Any] = {
             "outtmpl": outtmpl,
@@ -874,25 +907,41 @@ def download_section(url: str, dest_dir: Path, start: float, end: float,
             "ffmpeg_location": str(ffmpeg_bin_dir()),
             "socket_timeout": 30,
         }
-        if is_youtube(url):
-            if _pot_enabled():
-                opts["extractor_args"] = {
-                    "youtube": {"player_client": ["mweb", "web"], "fetch_pot": ["always"]},
-                    "youtubepot-bgutilhttp": {"base_url": [os.environ["VIRALCUT_POT_URL"]]},
-                }
+        if clients:
+            opts["extractor_args"] = {"youtube": clients}
+            if use_pot:
+                opts["extractor_args"]["youtubepot-bgutilhttp"] = {
+                    "base_url": [os.environ["VIRALCUT_POT_URL"]]}
                 opts["js_runtimes"] = {"node": {"path": os.environ["VIRALCUT_NODE"]}}
-            else:
-                opts["extractor_args"] = {"youtube": {"player_client": ["android", "tv"]}}
         opts.update(_cookie_opts(browser))
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.extract_info(url, download=True)
-            if any(p.suffix not in (".part", ".ytdl") for p in dest_dir.glob("section.*")):
-                break
         except Exception as exc:  # noqa: BLE001
             last_error = exc
-            if fi + 1 >= len(formats):
-                raise
+            continue
+
+        candidates_now = [p for p in dest_dir.glob("section.*") if p.suffix not in (".part", ".ytdl")]
+        if not candidates_now:
+            continue
+        got = max(candidates_now, key=lambda p: p.stat().st_size)
+        try:
+            info = _probe_dims(got)
+        except Exception:  # noqa: BLE001
+            info = {}
+        height_now = int(info.get("height") or 0)
+        if height_now and height_now < min_ok and label.startswith("HD") and fi + 1 < len(attempts):
+            print(f"[section] {label}: пришло {height_now}p, пробую другой клиент",
+                  file=sys.stderr, flush=True)
+            _clean_partials(dest_dir)
+            continue
+        if quality is not None:
+            quality["height"] = height_now
+            quality["label"] = label
+        print(f"[section] скачано {height_now or '?'}p ({label})", file=sys.stderr, flush=True)
+        break
+    else:
+        raise last_error or DownloadError("Не удалось скачать фрагмент видео.")
 
     candidates = [p for p in dest_dir.glob("section.*") if p.suffix not in (".part", ".ytdl")]
     if not candidates:

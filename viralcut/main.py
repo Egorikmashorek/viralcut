@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import custom_fonts, db, jobs, pipeline, render, resources, transcribe
+from . import custom_fonts, db, jobs, pipeline, render, resources, system_stats, transcribe
 from ._version import __version__
 from .config import ASSETS_DIR, DATA_DIR, PROJECTS_DIR, WEB_DIR, ffmpeg
 
@@ -158,6 +158,16 @@ def health() -> Dict[str, Any]:
         "limits": resources.summary(),
         "projects": db.count_projects(),
     }
+
+
+@app.get("/api/system")
+def system_state() -> Dict[str, Any]:
+    """Нагрузка машины для виджета: CPU, память, видеокарта."""
+    from . import system_stats
+
+    data = system_stats.snapshot({"hw": render.hw_encoder(), "limits": resources.summary()})
+    data["job"] = system_stats.active_job(db.list_projects(5))
+    return data
 
 
 @app.get("/api/update")

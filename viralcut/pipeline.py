@@ -5,6 +5,7 @@ import os
 import shutil
 import threading
 import time
+import sys
 import traceback
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -282,6 +283,7 @@ def _process_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
     sections = workdir / "sections"
     sections.mkdir(parents=True, exist_ok=True)
     settings = _clip_settings(opts)
+    low_res: List[int] = []
     for i, clip in enumerate(clips):
         _check_cancel(pid)
         base = i / total
@@ -295,12 +297,20 @@ def _process_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
         try:
             sec_start = max(0.0, float(clip["start"]) - 0.5)
             sec_end = min(duration or float(clip["end"]) + 1, float(clip["end"]) + 0.5)
+            quality: Dict[str, Any] = {}
             part = downloader.download_section(
                 project["url"], sections / clip["id"], sec_start, sec_end,
                 progress=sub_progress, browser=opts.get("cookies_browser") or None,
                 # пересборка в HD забирает фрагменты в 1080p, а не в 360
                 max_height=1080 if opts.get("force_hd") else int(opts.get("max_height", 1080)),
+                quality=quality,
             )
+            low_res.append(int(quality.get("height") or 0))
+            if os.environ.get("VIRALCUT_DEBUG_SECTIONS"):
+                info = utils.probe(part)
+                print(f"[section] клип {clip['idx'] + 1}: {info['width']}x{info['height']} "
+                      f"max_height={opts.get('max_height')} force_hd={opts.get('force_hd')}",
+                      file=sys.stderr, flush=True)
             actual = utils.media_duration(part)
             offset = max(0.0, float(clip["start"]) - sec_start)
             words = []
@@ -320,6 +330,13 @@ def _process_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
             db.update_clip(clip["id"], status="error", error=str(exc)[:400])
+
+    # если какие-то фрагменты пришли в низком разрешении — подскажем в интерфейсе
+    weak = [h for h in low_res if 0 < h < 720]
+    if weak:
+        db.merge_meta(pid, {"low_res_clips": len(weak), "low_res_height": min(weak)})
+        print(f"[section] низкое качество у {len(weak)} из {len(low_res)} фрагментов",
+              file=sys.stderr, flush=True)
 
     elapsed = round(time.time() - started, 1)
     if rendered == 0:

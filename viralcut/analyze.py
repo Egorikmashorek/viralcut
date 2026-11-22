@@ -75,6 +75,23 @@ CONTINUATION_END = [
     "because", "so", "and", "but", "or", "which", "that", "if", "when", "while",
 ]
 
+# Спонсорские вставки: их нельзя резать в клипы — «промокод», «ссылка в описании»
+# и «этот выпуск спонсируется» в ленте выглядят как реклама, а не как контент.
+AD_STRONG = [
+    "промокод", "промо код", "промокоду", "скидк", "скидка", "скидку", "купон",
+    "ссылка в описании", "в описании", "по ссылке", "спонсор", "реклама",
+    "рекламодател", "партнёр", "партнер", "при поддержке", "благодаря",
+    "спонсируется", "наш партн", "промо",
+    "sponsored", "promo code", "discount", "use code", "link in the description",
+    "in the description", "our sponsor", "thanks to our", "partner",
+]
+AD_WEAK = [
+    "подпишись", "подписывайтесь", "подписывайся", "бесплатн", "попробуй",
+    "заказать", "магазин", "сервис", "доставка", "тариф", "бесплатный период",
+    "первый месяц", "процент", "экономия", "выгодн", "акция",
+    "subscribe", "free trial", "our partners", "check out", "sign up",
+]
+
 _NUM_RE = re.compile(r"\d+[.,]?\d*|%|₽|\$|€|руб|тысяч|миллион|миллиард|процент", re.I)
 _SENT_END = re.compile(r"[.!?…]+[\"'»)]*\s*$")
 _WORD_RE = re.compile(r"[\w\-']+", re.U)
@@ -92,6 +109,47 @@ def _count_patterns(text: str, patterns: List[str]) -> int:
 def _has_filler_start(text: str) -> bool:
     low = _norm(text).strip(" «\"'—-")
     return any(low.startswith(f) for f in FILLER_START)
+
+
+def _ad_score(text: str) -> int:
+    """Насколько фраза похожа на рекламную вставку (0 — не похожа)."""
+    low = _norm(text)
+    strong = sum(1 for p in AD_STRONG if p in low)
+    weak = sum(1 for p in AD_WEAK if p in low)
+    return strong * 2 + weak
+
+
+def detect_ads(sents: List[Dict[str, Any]], threshold: int = 2) -> List[Dict[str, Any]]:
+    """Находит спонсорские блоки: подряд идущие фразы с рекламными маркерами."""
+    blocks: List[Dict[str, Any]] = []
+    current: List[int] = []
+
+    def flush() -> None:
+        if len(current) >= 1 and sum(_ad_score(sents[i]["text"]) for i in current) >= threshold:
+            blocks.append({"from": current[0], "to": current[-1],
+                           "start": sents[current[0]]["start"],
+                           "end": sents[current[-1]]["end"],
+                           "score": sum(_ad_score(sents[i]["text"]) for i in current)})
+        current.clear()
+
+    for i, sent in enumerate(sents):
+        score = _ad_score(sent["text"])
+        if score >= 2:
+            current.append(i)
+        elif current and score == 1:
+            current.append(i)  # «подпишись» рядом с промокодом — тот же блок
+        else:
+            flush()
+    flush()
+    return blocks
+
+
+def _ad_overlap(start: float, end: float, blocks: List[Dict[str, Any]]) -> float:
+    """Сколько секунд клипа приходится на рекламные блоки."""
+    total = 0.0
+    for block in blocks:
+        total += max(0.0, min(end, block["end"]) - max(start, block["start"]))
+    return total
 
 
 def _starts_with_context(sent: Dict[str, Any]) -> bool:
@@ -407,6 +465,7 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
         return []
     curve, mean_db = energy_curve(media)
     hop = 0.25
+    ad_blocks = detect_ads(sents)
 
     candidates: List[Dict[str, Any]] = []
     n = len(sents)
@@ -428,6 +487,10 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
                 w_start, w_end = window[0]["start"], window[-1]["end"]
                 if w_end - w_start > max_dur:  # перестраховка на длинных фразах
                     window, w_start, w_end = sents[i:j + 1], start, end
+                span_len = max(0.1, w_end - w_start)
+                if ad_blocks and _ad_overlap(w_start, w_end, ad_blocks) > max(1.5, span_len * 0.2):
+                    # окно в основном про спонсора — в клипы не берём
+                    break
                 score, parts = _score_window(window, duration, curve, mean_db, hop)
                 candidates.append({
                     "start": round(w_start, 3), "end": round(w_end, 3),
@@ -528,6 +591,11 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
         start = c["start"]
         end = c["end"]
         # аккуратные границы: отступаем в тишину
+        for block in ad_blocks:
+            if start < block["start"] < end and start > block["start"] - 0.5:
+                start = block["start"]
+            if start < block["end"] < end and end < block["end"] + 0.5:
+                end = block["end"]
         start = max(0.0, _nearest_quiet(curve, mean_db, start - 0.10, hop, window=0.30))
         end = min(duration, _nearest_quiet(curve, mean_db, end + 0.18, hop))
         words = [w for w in c["words"] if w["end"] > start + 0.05 and w["start"] < end - 0.05]

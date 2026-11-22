@@ -61,6 +61,36 @@
     <main class="main" id="main"></main>
   </div>
 
+  <div class="hud" id="sysCard">
+    <button class="hud-head" id="sysToggle" type="button" title="Свернуть/развернуть">
+      <span class="hud-dot" id="sysDot"></span>
+      <span class="hud-title">Нагрузка</span>
+      <span class="hud-chip" id="sysHw">GPU</span>
+      <span class="hud-chevron">▾</span>
+    </button>
+    <div class="hud-body" id="sysBody">
+      <div class="sys-row">
+        <span class="sys-label">CPU</span>
+        <span class="sys-bar"><i id="sysCpuBar" style="width:0%"></i></span>
+        <b class="sys-val" id="sysCpuVal">—</b>
+      </div>
+      <div class="sys-row">
+        <span class="sys-label">RAM</span>
+        <span class="sys-bar"><i id="sysRamBar" style="width:0%"></i></span>
+        <b class="sys-val" id="sysRamVal">—</b>
+      </div>
+      <div class="sys-row">
+        <span class="sys-label">GPU</span>
+        <span class="sys-bar"><i id="sysGpuBar" style="width:0%"></i></span>
+        <b class="sys-val" id="sysGpuVal">—</b>
+      </div>
+      <div class="hud-foot">
+        <span id="sysRamText">—</span>
+        <span id="sysJob" class="hud-job"></span>
+      </div>
+    </div>
+  </div>
+
   <div class="modal hidden" id="modal"></div>
   <div id="toasts"></div>
   <input type="file" id="fileInput" accept="video/*" class="hidden" />

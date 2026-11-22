@@ -935,6 +935,11 @@ function fallbackHTML(project) {
     return `<div class="warn-box"><strong>1080p не удалось.</strong> ${reason}. Сейчас используется ${m.source_height || "?"}p.
       <button class="link-btn" data-action="retry-hd">Повторить в 1080p</button></div>`;
   }
+  // часть фрагментов скачалась в низком разрешении (например, YouTube отдал SD)
+  if (m.low_res_clips) {
+    return `<div class="warn-box">${m.low_res_clips} из клипов собраны из фрагментов ${m.low_res_height || "SD"}p — источник отдал низкое качество.
+      <button class="link-btn" data-action="retry-hd">Пересобрать в 1080p</button></div>`;
+  }
   // экономный режим собрал клипы из фрагментов ниже 1080p — даём кнопку пересборки
   const econHeight = Number(m.max_height || (project.options && project.options.max_height) || 0);
   if (m.segments_mode && econHeight < 1080) {
@@ -1979,6 +1984,98 @@ function renderUpdate(data) {
   }
 }
 
+async function pollSystem() {
+  try {
+    const res = await fetch("/api/system");
+    if (!res.ok) return;
+    renderSystem(await res.json());
+  } catch (_) { /* сервер недоступен — оставляем прошлые значения */ }
+}
+
+function sysLevel(percent) {
+  if (percent == null) return "";
+  if (percent >= 85) return "hot";
+  if (percent >= 60) return "warn";
+  return "";
+}
+
+const fmtGb = (mb) => (mb / 1024).toFixed(1).replace(".", ",");
+
+function renderSystem(data) {
+  if (!data) return;
+  const set = (barId, valId, percent) => {
+    const bar = $(barId);
+    const val = $(valId);
+    if (!bar || !val) return;
+    if (percent == null || Number.isNaN(percent)) {
+      bar.style.width = "0%";
+      bar.className = "";
+      val.textContent = "н/д";
+      return;
+    }
+    bar.style.width = `${Math.max(2, Math.min(100, percent))}%`;
+    bar.className = sysLevel(percent);
+    val.textContent = `${Math.round(percent)}%`;
+  };
+  set("#sysCpuBar", "#sysCpuVal", data.cpu);
+  set("#sysRamBar", "#sysRamVal", data.ram ? data.ram.percent : null);
+  set("#sysGpuBar", "#sysGpuVal", data.gpu ? data.gpu.percent : null);
+
+  // память отдельной строкой — проценты в полоске, гигабайты текстом
+  const ramText = $("#sysRamText");
+  if (ramText) {
+    const ram = data.ram || {};
+    ramText.textContent = ram.total_mb
+      ? `RAM ${fmtGb(ram.used_mb)} / ${fmtGb(ram.total_mb)} ГБ`
+      : "RAM н/д";
+  }
+
+  const chip = $("#sysHw");
+  if (chip) {
+    const name = data.gpu && data.gpu.name ? String(data.gpu.name) : "";
+    chip.textContent = name || (data.app && data.app.hw ? String(data.app.hw).replace("h264_", "") : "GPU");
+  }
+
+  // текущий процесс: что именно делает приложение
+  const job = $("#sysJob");
+  const dot = $("#sysDot");
+  if (job) {
+    if (data.job && data.job.stage) {
+      const pct = Math.round(data.job.progress || 0);
+      const stage = String(data.job.stage).replace(/ · \d+ с$/, "");
+      job.textContent = `${stage}${pct > 0 ? ` · ${pct}%` : ""}`;
+      job.classList.add("active");
+      job.title = data.job.title || "";
+      if (dot) dot.classList.add("active");
+    } else {
+      job.textContent = "Простой";
+      job.classList.remove("active");
+      job.title = "";
+      if (dot) dot.classList.remove("active");
+    }
+  }
+
+  const worst = Math.max(data.cpu || 0, (data.ram && data.ram.percent) || 0, (data.gpu && data.gpu.percent) || 0);
+  if (dot) {
+    dot.className = `hud-dot ${sysLevel(worst)}`.trim();
+  }
+}
+
+function bindHud() {
+  const head = $("#sysToggle");
+  const card = $("#sysCard");
+  if (!head || !card) return;
+  try {
+    if (localStorage.getItem("vcHudCollapsed") === "1") card.classList.add("collapsed");
+  } catch (_) {}
+  head.addEventListener("click", () => {
+    card.classList.toggle("collapsed");
+    try {
+      localStorage.setItem("vcHudCollapsed", card.classList.contains("collapsed") ? "1" : "0");
+    } catch (_) {}
+  });
+}
+
 function bindUpdateCard() {
   const card = $("#updateCard");
   if (!card) return;
@@ -2011,6 +2108,9 @@ window.addEventListener("hashchange", () => {
 
 (async function boot() {
   bindUpdateCard();
+  bindHud();
+  pollSystem();
+  setInterval(pollSystem, 2000);
   checkUpdates();
   setInterval(checkUpdates, 30 * 60 * 1000);
   await checkHealth();

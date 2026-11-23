@@ -2490,6 +2490,141 @@ async function openAiAdvice(project) {
   });
 }
 
+const ASSISTANT = { open: false, history: [], booted: false, busy: false };
+
+function assistantEls() {
+  return { drawer: $("#assistant"), body: $("#assistantBody"), input: $("#assistantInput") };
+}
+
+function ensureAssistant() {
+  if ($("#assistant")) return;
+  const wrap = document.createElement("aside");
+  wrap.id = "assistant";
+  wrap.className = "assistant hidden";
+  wrap.innerHTML = `
+    <div class="assistant-head">
+      <div class="assistant-title">${ICONS.spark}<span>Помощник</span></div>
+      <div class="assistant-actions">
+        <button class="icon-btn" id="assistantClear" title="Очистить диалог">↺</button>
+        <button class="icon-btn" id="assistantClose" aria-label="Закрыть">${ICONS.close}</button>
+      </div>
+    </div>
+    <div class="assistant-body" id="assistantBody"></div>
+    <div class="assistant-suggest" id="assistantSuggest"></div>
+    <form class="assistant-form" id="assistantForm">
+      <textarea id="assistantInput" rows="1" maxlength="600"
+        placeholder="Спросите что угодно про приложение…"></textarea>
+      <button class="btn-primary" type="submit" id="assistantSend">Спросить</button>
+    </form>`;
+  document.body.appendChild(wrap);
+  $("#assistantClose").addEventListener("click", () => closeAssistant());
+  $("#assistantClear").addEventListener("click", () => {
+    ASSISTANT.history = [];
+    const { body } = assistantEls();
+    if (body) body.innerHTML = "";
+    assistantWelcome(true);
+  });
+  $("#assistantForm").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const { input } = assistantEls();
+    if (input) askAssistant(input.value);
+  });
+  $("#assistantInput").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.shiftKey) {
+      ev.preventDefault();
+      askAssistant(ev.target.value);
+    }
+  });
+}
+
+function assistantMsg(role, text, extra) {
+  const { body } = assistantEls();
+  if (!body) return;
+  const item = document.createElement("div");
+  item.className = `assistant-msg ${role}`;
+  item.innerHTML = text.split("\n").map((line) => `<p>${esc(line)}</p>`).join("");
+  if (extra) item.insertAdjacentHTML("beforeend", `<div class="set-hint">${esc(extra)}</div>`);
+  body.appendChild(item);
+  body.scrollTop = body.scrollHeight;
+  return item;
+}
+
+async function assistantWelcome(silent) {
+  const { body } = assistantEls();
+  if (!body) return;
+  let data = null;
+  try {
+    const query = state.current ? `?project_id=${encodeURIComponent(state.current)}` : "";
+    data = await api(`/api/assistant${query}`);
+  } catch (e) {
+    data = { welcome: "Помощник недоступен — сервер не отвечает.", suggestions: [] };
+  }
+  ASSISTANT.booted = true;
+  body.innerHTML = "";
+  assistantMsg("bot", data.welcome || "");
+  const box = $("#assistantSuggest");
+  if (box) {
+    box.innerHTML = (data.suggestions || [])
+      .map((text) => `<button class="assistant-chip" type="button">${esc(text)}</button>`)
+      .join("");
+    $$(".assistant-chip", box).forEach((chip) => chip.addEventListener("click", () => {
+      askAssistant(chip.textContent);
+    }));
+  }
+  if (!silent) body.scrollTop = 0;
+}
+
+async function askAssistant(raw) {
+  const question = String(raw || "").trim();
+  if (!question || ASSISTANT.busy) return;
+  const { input } = assistantEls();
+  if (input) { input.value = ""; input.style.height = "auto"; }
+  ASSISTANT.busy = true;
+  assistantMsg("user", question);
+  const pending = assistantMsg("bot pending", "Думаю…");
+  try {
+    const data = await api("/api/assistant", {
+      method: "POST",
+      body: JSON.stringify({
+        message: question,
+        history: ASSISTANT.history.slice(-8),
+        project_id: state.current || null,
+      }),
+    });
+    pending.remove();
+    assistantMsg("bot", data.answer || "Пустой ответ.");
+    if (data.hint) assistantMsg("note", data.hint);
+    if (data.source === "local" && !data.hint) {
+      assistantMsg("note", "Отвечаю по встроенной инструкции: ключ ИИ не задан (настройки → ИИ-помощник).");
+    }
+    ASSISTANT.history.push({ role: "user", content: question });
+    ASSISTANT.history.push({ role: "assistant", content: String(data.answer || "").slice(0, 2000) });
+  } catch (e) {
+    pending.remove();
+    assistantMsg("bot", "Не получилось: " + String(e.message || e));
+  } finally {
+    ASSISTANT.busy = false;
+  }
+}
+
+function openAssistant(silent) {
+  ensureAssistant();
+  const drawer = $("#assistant");
+  if (!drawer) return;
+  drawer.classList.remove("hidden");
+  ASSISTANT.open = true;
+  try { localStorage.setItem("vcAssistantSeen", "1"); } catch (e) {}
+  if (!ASSISTANT.booted) assistantWelcome(silent);
+  $("#assistantInput")?.focus();
+}
+
+function closeAssistant() {
+  const drawer = $("#assistant");
+  if (drawer) drawer.classList.add("hidden");
+  ASSISTANT.open = false;
+  try { localStorage.setItem("vcAssistantSeen", "1"); } catch (e) {}
+}
+
 async function openSettings() {
   let conf = { encoder: "auto", download_dir: "", clips_dir: "", ask_folder: true,
                hw_available: null, power: 50, cpu_limit: 100, gpu_preference: "auto",
@@ -3001,6 +3136,9 @@ async function withRetry(fn, tries = 4, delay = 500) {
 
   try { bindUpdateCard(); } catch (e) { console.error(e); }
   try { $("#settingsBtn")?.addEventListener("click", openSettings); } catch (e) { console.error(e); }
+  try {
+    $("#helpBtn")?.addEventListener("click", () => (ASSISTANT.open ? closeAssistant() : openAssistant()));
+  } catch (e) { console.error(e); }
   try { bindHud(); } catch (e) { console.error(e); }
   try { pollSystem(); setInterval(pollSystem, 2000); } catch (e) { console.error(e); }
   try { checkUpdates(); setInterval(checkUpdates, 30 * 60 * 1000); } catch (e) { console.error(e); }
@@ -3013,6 +3151,12 @@ async function withRetry(fn, tries = 4, delay = 500) {
 
   try { await loadFontCatalog(); } catch (e) { console.error(e); }
   try { await loadAiStatus(); } catch (e) { console.error(e); }
+  try {
+    // первый запуск: помощник сам рассказывает, что делать
+    if (localStorage.getItem("vcAssistantSeen") !== "1") {
+      setTimeout(() => openAssistant(true), 1200);
+    }
+  } catch (e) { console.error(e); }
 
   try {
     await withRetry(() => loadProjects(), 4, 600);

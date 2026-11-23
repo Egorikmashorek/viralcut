@@ -14,9 +14,9 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import (ai, cpu_limit, custom_fonts, db, gpu_pref, jobs, pipeline,
-               render, resources, settings as app_settings, system_stats,
-               transcribe, utils)
+from . import (ai, assistant, cpu_limit, custom_fonts, db, gpu_pref, jobs,
+               pipeline, render, resources, settings as app_settings,
+               system_stats, transcribe, utils)
 from ._version import __version__
 from .config import ASSETS_DIR, DATA_DIR, PROJECTS_DIR, WEB_DIR, ffmpeg
 
@@ -35,6 +35,12 @@ class PipIn(BaseModel):
     pos: Optional[List[float]] = None
     size: Optional[float] = None
     radius: Optional[int] = None
+
+
+class AssistantIn(BaseModel):
+    message: str
+    history: Optional[List[Dict[str, str]]] = None
+    project_id: Optional[str] = None
 
 
 class AdviceIn(BaseModel):
@@ -380,6 +386,55 @@ def settings_set(body: SettingsIn) -> Dict[str, Any]:
 def ai_status() -> Dict[str, Any]:
     """Провайдер, модель и есть ли ключ (сам ключ не отдаём)."""
     return ai.status()
+
+
+def _assistant_context(project_id: Optional[str] = None) -> Dict[str, Any]:
+    """Факты о приложении для помощника: что настроено и что происходит."""
+    from . import system_stats
+
+    gpu_name = ""
+    try:
+        gpu_info = system_stats.gpu()
+        gpu_name = str(gpu_info.get("name") or "")
+    except Exception:  # noqa: BLE001
+        gpu_name = ""
+    context: Dict[str, Any] = {
+        "version": __version__,
+        "platform": sys.platform,
+        "ai": ai.status(),
+        "limits": resources.summary(),
+        "gpu": gpu_name,
+        "hw": render.hw_cached(),
+        "model_cached": transcribe.model_cached(),
+    }
+    if project_id:
+        project = db.get_project(project_id)
+        if project:
+            context["project"] = {
+                "status": project.get("status"),
+                "language": project.get("language"),
+                "clips": len(db.list_clips(project_id)),
+            }
+    return context
+
+
+@app.get("/api/assistant")
+def assistant_start(project_id: Optional[str] = None) -> Dict[str, Any]:
+    """Приветствие и подсказки: помощник открывается сразу с делом."""
+    context = _assistant_context(project_id)
+    return {
+        "welcome": assistant.welcome(context),
+        "suggestions": assistant.suggestions(),
+        "configured": bool(context["ai"].get("configured")),
+        "sections": [{"key": s["key"], "title": s["title"]} for s in assistant.SECTIONS],
+    }
+
+
+@app.post("/api/assistant")
+def assistant_ask(body: AssistantIn) -> Dict[str, Any]:
+    """Вопрос помощнику: с ключом отвечает модель, без ключа — встроенная база."""
+    context = _assistant_context(body.project_id)
+    return assistant.ask(body.message, context, body.history)
 
 
 @app.get("/api/ai/models")

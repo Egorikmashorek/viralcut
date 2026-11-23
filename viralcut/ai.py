@@ -464,6 +464,28 @@ def plan_clips(segments: List[Dict[str, Any]], duration: float,
             "took": round(time.time() - started, 2), "instruction": instruction.strip()}
 
 
+def chat(messages: List[Dict[str, str]], *, max_tokens: int = 700,
+         temperature: float = 0.3) -> Dict[str, Any]:
+    """Универсальный запрос к выбранной модели (используется помощником)."""
+    conf = _conf()
+    api_key = key()
+    if not api_key:
+        raise AIError("Не задан ключ ИИ.")
+    if not conf["base"] or not conf["model"]:
+        raise AIError("Не выбран провайдер или модель ИИ.")
+    payload = {"model": conf["model"], "messages": messages,
+               "temperature": temperature, "max_tokens": max_tokens}
+    data = _post(f"{conf['base']}/chat/completions", payload, api_key)
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise AIError("Сервер ИИ вернул ответ без текста.") from exc
+    text = str(content or "").strip()
+    if not text:
+        raise AIError("Сервер ИИ вернул пустой ответ.")
+    return {"text": text, "model": conf["model"], "provider": conf["provider"]}
+
+
 def advice(project: Dict[str, Any], clip: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Совет по проекту/клипу. Бросает AIError с понятным текстом."""
     conf = _conf()

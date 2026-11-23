@@ -306,7 +306,10 @@ def execute(action: Dict[str, Any],
     if kind == "rerender_clip":
         from . import jobs as jobs_module
 
-        clip = db.get_clip(action.get("clip_id") or "")
+        try:
+            clip = db.get_clip(action.get("clip_id") or "")
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "type": kind, "message": "База проектов сейчас недоступна."}
         if not clip:
             return {"ok": False, "type": kind, "message": "Клип не найден."}
         patch = {key: action[key] for key in
@@ -324,7 +327,10 @@ def execute(action: Dict[str, Any],
     if kind == "update_project":
         from . import pipeline as pipeline_module
 
-        project = db.get_project(action.get("project_id") or "")
+        try:
+            project = db.get_project(action.get("project_id") or "")
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "type": kind, "message": "База проектов сейчас недоступна."}
         if not project:
             return {"ok": False, "type": kind, "message": "Проект не найден."}
         patch = {key: action[key] for key in
@@ -339,17 +345,23 @@ def execute(action: Dict[str, Any],
                     f"{k}={v}" for k, v in patch.items())}
 
     if kind == "list_projects":
-        items = db.list_projects(limit=10)
+        try:
+            items = db.list_projects(limit=10)
+        except Exception:  # noqa: BLE001 — база недоступна: не роняем помощника
+            return {"ok": False, "type": kind, "message": "База проектов сейчас недоступна."}
         lines = [f"{p['id']} · {p.get('status')} · {(p.get('title') or '')[:40]}"
                  for p in items]
         return {"ok": True, "type": kind, "projects": items,
                 "message": "Проекты: " + "; ".join(lines) if lines else "Проектов пока нет."}
 
     if kind == "get_project":
-        project = db.get_project(action.get("project_id") or "")
+        try:
+            project = db.get_project(action.get("project_id") or "")
+            clips = db.list_clips(project["id"]) if project else []
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "type": kind, "message": "База проектов сейчас недоступна."}
         if not project:
             return {"ok": False, "type": kind, "message": "Проект не найден."}
-        clips = db.list_clips(project["id"])
         return {"ok": True, "type": kind, "project": project, "clips": clips,
                 "message": (f"Статус {project.get('status')}, клипов {len(clips)}, "
                             f"язык {project.get('language') or '—'}")}
@@ -357,7 +369,10 @@ def execute(action: Dict[str, Any],
     if kind == "advice":
         from . import ai as ai_module
 
-        project = db.get_project(action.get("project_id") or "")
+        try:
+            project = db.get_project(action.get("project_id") or "")
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "type": kind, "message": "База проектов сейчас недоступна."}
         if not project:
             return {"ok": False, "type": kind,
                     "message": "Проект не найден — сначала запустите нарезку."}
@@ -378,7 +393,11 @@ def execute(action: Dict[str, Any],
 
     if kind == "open_project":
         pid = action.get("project_id") or ""
-        if not db.get_project(pid):
+        try:
+            exists = bool(db.get_project(pid))
+        except Exception:  # noqa: BLE001
+            exists = False
+        if not exists:
             return {"ok": False, "type": kind, "message": "Проект не найден"}
         return {"ok": True, "type": kind, "ui": {"open_project": pid},
                 "message": "Открываю проект"}

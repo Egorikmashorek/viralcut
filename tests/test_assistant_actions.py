@@ -132,7 +132,14 @@ class ExecuteTest(unittest.TestCase):
         self.assertEqual(actions.execute({"type": "open_settings"})["ui"]["open_settings"], True)
 
     def test_open_project_missing(self):
-        self.assertFalse(actions.execute({"type": "open_project", "project_id": "nope"})["ok"])
+        with mock.patch.object(actions.db, "get_project", return_value=None):
+            self.assertFalse(actions.execute({"type": "open_project", "project_id": "nope"})["ok"])
+
+    def test_open_project_survives_broken_db(self):
+        with mock.patch.object(actions.db, "get_project", side_effect=RuntimeError("нет базы")):
+            result = actions.execute({"type": "open_project", "project_id": "abc"})
+        self.assertFalse(result["ok"])
+        self.assertIn("не найден", result["message"])
 
     def test_start_cut_without_target(self):
         result = actions.execute({"type": "start_cut"}, {})

@@ -91,7 +91,7 @@ class AskTest(unittest.TestCase):
         result = assistant.ask("как нарезать видео", _ctx(configured=False))
         self.assertEqual(result["source"], "local")
         self.assertIn("С чего начать", result["answer"])
-        self.assertIn("встроенной инструкции", result.get("hint", ""))
+        self.assertIn("встроенным правилам", result.get("hint", ""))
 
     def test_with_key_calls_model(self):
         settings.update({"ai_key": "sk-test-1", "ai_provider": "custom",

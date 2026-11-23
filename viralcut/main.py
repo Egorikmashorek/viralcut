@@ -411,6 +411,7 @@ def _assistant_context(project_id: Optional[str] = None) -> Dict[str, Any]:
         project = db.get_project(project_id)
         if project:
             context["project"] = {
+                "id": project.get("id"),
                 "status": project.get("status"),
                 "language": project.get("language"),
                 "clips": len(db.list_clips(project_id)),

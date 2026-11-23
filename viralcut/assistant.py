@@ -318,21 +318,56 @@ def fallback_answer(question: str) -> Dict[str, Any]:
     }
 
 
+def _run_actions(actions: List[Dict[str, Any]],
+                 context: Dict[str, Any]) -> Dict[str, Any]:
+    """Выполняет команды помощника: возвращает результаты и подсказки интерфейсу."""
+    from . import assistant_actions
+
+    if not actions:
+        return {"results": [], "ui": {}, "messages": []}
+    results = [assistant_actions.execute(action, context) for action in actions]
+    ui: Dict[str, Any] = {}
+    messages: List[str] = []
+    for result in results:
+        ui.update(result.get("ui") or {})
+        if result.get("message"):
+            messages.append(str(result["message"]))
+    return {"results": results, "ui": ui, "messages": messages}
+
+
+def _with_actions(answer: str, actions: List[Dict[str, Any]],
+                  context: Dict[str, Any], source: str = "ai",
+                  extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    done = _run_actions(actions, context)
+    text = answer.strip()
+    if done["messages"]:
+        text = (text + "\n\n" if text else "") + "Готово: " + "; ".join(done["messages"]) + "."
+    payload: Dict[str, Any] = {"answer": text or "Готово.", "source": source,
+                               "actions": done["results"], "ui": done["ui"]}
+    if extra:
+        payload.update(extra)
+    return payload
+
+
 def ask(question: str, context: Dict[str, Any],
         history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
-    """Ответ модели с базой знаний; без ключа или при ошибке — локальный ответ."""
+    """Ответ модели с базой знаний и выполнением действий."""
     from . import ai as ai_module
+    from . import assistant_actions
 
     question = (question or "").strip()
     if not question:
         return {"answer": "Напишите вопрос — например, «как нарезать видео?»", "source": "local"}
     if not ai_module.configured():
-        result = fallback_answer(question)
-        result["hint"] = "Ключ ИИ не задан — отвечаю по встроенной инструкции."
+        actions = assistant_actions.parse_local(question)
+        found = local_answer(question) or fallback_answer(question)
+        result = _with_actions(found["answer"], actions, context, source="local",
+                               extra={"hint": "Ключ ИИ не задан — выполняю по встроенным правилам."})
         return result
     messages: List[Dict[str, str]] = [
-        {"role": "system", "content": WELCOME_RULES + "\n\nБаза знаний:\n" + knowledge_text()
-         + "\n\nСостояние:\n" + _context_block(context)},
+        {"role": "system", "content": (WELCOME_RULES + "\n\n" + assistant_actions.ACTIONS_SPEC
+                                       + "\n\nБаза знаний:\n" + knowledge_text()
+                                       + "\n\nСостояние:\n" + _context_block(context))},
     ]
     for item in (history or [])[-8:]:
         role = item.get("role")
@@ -341,9 +376,14 @@ def ask(question: str, context: Dict[str, Any],
             messages.append({"role": role, "content": content})
     messages.append({"role": "user", "content": question})
     try:
-        data = ai_module.chat(messages, max_tokens=700, temperature=0.3)
+        data = ai_module.chat(messages, max_tokens=900, temperature=0.3)
     except Exception as exc:  # noqa: BLE001 — помощник не должен молчать
-        result = fallback_answer(question)
-        result["hint"] = f"Модель недоступна ({str(exc)[:120]}) — отвечаю по инструкции."
-        return result
-    return {"answer": data["text"], "source": "ai", "model": data.get("model")}
+        actions = assistant_actions.parse_local(question)
+        found = fallback_answer(question)
+        return _with_actions(found["answer"], actions, context, source="local",
+                             extra={"hint": f"Модель недоступна ({str(exc)[:120]}) — "
+                                            "отвечаю по инструкции."})
+    text = str(data.get("text") or "")
+    actions = assistant_actions.parse_from_text(text)
+    return _with_actions(assistant_actions.strip_actions(text), actions, context,
+                         source="ai", extra={"model": data.get("model")})

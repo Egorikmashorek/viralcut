@@ -2594,6 +2594,7 @@ async function askAssistant(raw) {
     pending.remove();
     assistantMsg("bot", data.answer || "Пустой ответ.");
     if (data.hint) assistantMsg("note", data.hint);
+    await applyAssistantUI(data);
     if (data.source === "local" && !data.hint) {
       assistantMsg("note", "Отвечаю по встроенной инструкции: ключ ИИ не задан (настройки → ИИ-помощник).");
     }
@@ -2604,6 +2605,37 @@ async function askAssistant(raw) {
     assistantMsg("bot", "Не получилось: " + String(e.message || e));
   } finally {
     ASSISTANT.busy = false;
+  }
+}
+
+async function applyAssistantUI(data) {
+  const ui = (data && data.ui) || {};
+  const actions = (data && data.actions) || [];
+  // что-то изменилось на сервере — обновляем виджеты и список проектов
+  if (actions.some((a) => a.type === "set_settings")) {
+    try { pollSystem(); } catch (e) {}
+    try { await loadAiStatus(); } catch (e) {}
+  }
+  if (actions.some((a) => a.type === "start_cut")) {
+    try { await loadProjects(); } catch (e) {}
+    if (ui.open_project) return applyAssistantUI({ ui });
+  }
+  if (ui.ai_mode !== undefined) {
+    state.opts.aiMode = Boolean(ui.ai_mode);
+    if (ui.prompt) state.opts.aiPrompt = String(ui.prompt);
+    const toggle = $("#aiModeToggle");
+    if (toggle) toggle.checked = state.opts.aiMode;
+    const card = $("#aiModeCard");
+    if (card) card.classList.toggle("on", state.opts.aiMode);
+  }
+  if (ui.open_settings) {
+    try { await openSettings(); } catch (e) { console.error(e); }
+  }
+  if (ui.open_project) {
+    try {
+      await loadProjects();
+      openProject(ui.open_project);
+    } catch (e) { console.error(e); }
   }
 }
 

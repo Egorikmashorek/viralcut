@@ -2207,8 +2207,11 @@ function renderSystem(data) {
     const gpu = data.gpu || {};
     chip.title = [
       gpu.vendor ? gpu.vendor.toUpperCase() : "",
-      gpu.source && gpu.source !== "none" ? `источник: ${gpu.source}` : ""
+      gpu.discrete ? "дискретная" : "",
+      gpu.source && gpu.source !== "none" ? `источник: ${gpu.source}` : "",
+      Array.isArray(gpu.adapters) && gpu.adapters.length > 1 ? `адаптеры: ${gpu.adapters.join(", ")}` : ""
     ].filter(Boolean).join(" · ");
+    chip.classList.toggle("discrete", Boolean(gpu.discrete));
   }
 
   // текущий процесс: что именно делает приложение
@@ -2253,6 +2256,46 @@ async function chooseFolder(kind) {
   }
 }
 
+const POWER_STEPS = [
+  [0, "Экономно"], [25, "Тихо"], [50, "Баланс"], [75, "Быстро"], [90, "Максимум"], [100, "Максимум"],
+];
+
+function powerLabel(value) {
+  const v = Math.max(0, Math.min(100, Number(value) || 0));
+  if (v <= 12) return "Экономно";
+  if (v <= 37) return "Тихо";
+  if (v <= 62) return "Баланс";
+  if (v <= 87) return "Быстро";
+  return "Максимум";
+}
+
+function gpuListHint(gpus) {
+  if (!gpus || !Array.isArray(gpus.list) || !gpus.list.length) return "";
+  const names = gpus.list.map((name) => esc(name)).join(", ");
+  const discrete = gpus.discrete ? ` Дискретная: ${esc(gpus.discrete)}.` : "";
+  return `<br />Найдено видеокарт: ${names}.${discrete}`;
+}
+
+function ruPlural(count, one, few, many) {
+  const abs = Math.abs(Math.round(count)) % 100;
+  const tail = abs % 10;
+  if (abs > 10 && abs < 20) return many;
+  if (tail > 1 && tail < 5) return few;
+  if (tail === 1) return one;
+  return many;
+}
+
+function powerHint(limits) {
+  if (!limits) return "Приложение не займёт всю машину: число рендеров и потоков зависит от этого ползунка.";
+
+  const parts = [];
+  if (limits.render_workers) parts.push(`${limits.render_workers} ${ruPlural(limits.render_workers, "рендер", "рендера", "рендеров")}`);
+  if (limits.ffmpeg_threads) parts.push(`${limits.ffmpeg_threads} ${ruPlural(limits.ffmpeg_threads, "поток", "потока", "потоков")} ffmpeg`);
+  if (limits.whisper_threads) parts.push(`${limits.whisper_threads} ${ruPlural(limits.whisper_threads, "поток", "потока", "потоков")} распознавания`);
+  const cpu = limits.cpu ? ` из ${limits.cpu} ядер` : "";
+  return parts.length ? `Сейчас: ${parts.join(" · ")}${cpu}.` : "Лимиты применятся к следующей задаче.";
+}
+
 async function openSettings() {
   let conf = { encoder: "auto", download_dir: "", clips_dir: "", ask_folder: true, hw_available: null };
   try { conf = await api("/api/settings"); } catch (e) { console.error(e); }
@@ -2272,7 +2315,18 @@ async function openSettings() {
           </div>
           <div class="set-hint">
             Видеокарта ускоряет кодирование, когда доступен аппаратный кодировщик${conf.hw_available ? ` (${esc(conf.hw_available)})` : ""}.
+            ${gpuListHint(conf.gpus)}
           </div>
+        </div>
+        <div class="form-card set-section power-section">
+          <h4>Мощность</h4>
+          <div class="power-row">
+            <input type="range" id="setPower" min="0" max="100" step="5"
+                   value="${Number(conf.power ?? 50)}" aria-label="Мощность обработки" />
+            <output id="setPowerValue" class="power-value">${powerLabel(conf.power ?? 50)}</output>
+          </div>
+          <div class="power-scale"><span>Экономно</span><span>Баланс</span><span>Максимум</span></div>
+          <div class="set-hint" id="setPowerHint">${powerHint(conf.limits)}</div>
         </div>
         <div class="form-card set-section paths-section">
           <h4>Папки сохранения</h4>
@@ -2321,6 +2375,17 @@ async function openSettings() {
       diagBtn.textContent = "Разобрать журнал";
     }
   });
+  const powerInput = $("#setPower");
+  if (powerInput) {
+    const syncPower = () => {
+      const value = Number(powerInput.value);
+      const label = $("#setPowerValue");
+      if (label) label.textContent = powerLabel(value);
+      const hint = $("#setPowerHint");
+      if (hint) hint.textContent = powerHint(conf.limits) + (value > 0 ? "" : " Экономный режим: один рендер.");
+    };
+    powerInput.addEventListener("input", syncPower);
+  }
   $("#setDownloadPick").addEventListener("click", () => chooseFolder("download"));
   $("#setClipsPick").addEventListener("click", () => chooseFolder("clips"));
   let encoder = conf.encoder || "auto";
@@ -2339,6 +2404,7 @@ async function openSettings() {
           download_dir: $("#setDownloadDir").value.trim(),
           clips_dir: $("#setClipsDir").value.trim(),
           ask_folder: $("#setAskFolder").checked,
+          power: Number($("#setPower").value),
         }),
       });
       closeModal();

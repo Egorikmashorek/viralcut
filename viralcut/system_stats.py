@@ -372,17 +372,100 @@ def _gpu_vendor(name: str) -> str:
     return ""
 
 
-def _gpu_windows_registry_name() -> str:
-    """Имя видеокарты из реестра — тоже без запуска процессов."""
+_VIRTUAL_GPU = re.compile(
+    r"basic display|basic render|remote|virtual|parsec|spacedesk|sunshine|idd", re.I)
+
+
+_ADAPTERS_CACHE: Dict[str, Any] = {"value": [], "ts": 0.0}
+
+
+def _windows_adapters_cached() -> List[str]:
+    """Список адаптеров с кэшем на минуту: реестр не меняется на ходу."""
+    now = time.monotonic()
+    if _ADAPTERS_CACHE["value"] and now - float(_ADAPTERS_CACHE["ts"]) < 60.0:
+        return list(_ADAPTERS_CACHE["value"])
+    names = _windows_adapters()
+    if names:
+        _ADAPTERS_CACHE.update({"value": names, "ts": now})
+    return names
+
+
+def _windows_adapters() -> List[str]:
+    """Все адаптеры из реестра, по одному разу.
+
+    На ноутбуках их два: встроенная Intel/AMD и дискретная NVIDIA/Radeon.
+    WinSAT отдаёт только «основной», а он почти всегда встроенный — из-за этого
+    виджет показывал интегрированную карту и «не видел» дискретную.
+    """
+    names: List[str] = []
+    try:
+        import winreg  # type: ignore[import-not-found]
+
+        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                              r"SYSTEM\CurrentControlSet\Control\Video")
+        index = 0
+        while True:
+            try:
+                guid = winreg.EnumKey(root, index)
+            except OSError:
+                break
+            index += 1
+            try:
+                child = winreg.OpenKey(root, guid + r"\0000")
+                value, _ = winreg.QueryValueEx(child, "DriverDesc")
+                child.Close()
+            except OSError:
+                continue
+            name = str(value or "").strip()
+            if name and not _VIRTUAL_GPU.search(name) and name not in names:
+                names.append(name)
+        root.Close()
+    except Exception:  # noqa: BLE001 — реестр недоступен: работаем без списка
+        return []
+    return names
+
+
+def _windows_primary_name() -> str:
+    """Имя «основного» адаптера из WinSAT — запасной вариант."""
     try:
         import winreg  # type: ignore[import-not-found]
 
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
                              r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\WinSAT")
         value, _ = winreg.QueryValueEx(key, "PrimaryAdapterString")
-        return str(value).strip() or "GPU"
+        return str(value).strip()
     except Exception:  # noqa: BLE001
-        return "GPU"
+        return ""
+
+
+def _gpu_rank(name: str) -> int:
+    """Чем больше, тем «дискретнее»: выбираем самую мощную карту из списка."""
+    low = (name or "").lower()
+    if "nvidia" in low or "geforce" in low or "rtx" in low or "gtx" in low or "quadro" in low:
+        return 40
+    if "radeon rx" in low or "radeon pro" in low or "firepro" in low:
+        return 35
+    if "amd" in low or "radeon" in low:
+        return 30
+    if "arc" in low:
+        return 25
+    if "intel" in low or "iris" in low or "uhd" in low or "hd graphics" in low:
+        return 10
+    return 5
+
+
+def _pick_gpu(names: List[str]) -> tuple[str, bool]:
+    """Имя и признак дискретности: приоритет у отдельной карты."""
+    if not names:
+        return "", False
+    best = max(names, key=_gpu_rank)
+    return best, _gpu_rank(best) >= 25
+
+
+def _gpu_windows_registry_name() -> str:
+    """Имя видеокарты для подписи в виджете (по возможности дискретной)."""
+    name, _discrete = _pick_gpu(_windows_adapters())
+    return name or _windows_primary_name() or "GPU"
 
 
 def _gpu_windows_adl() -> Dict[str, Any]:
@@ -500,12 +583,36 @@ def _gpu_windows() -> Dict[str, Any]:
     if _GPU_CACHE.get("value") and now - _GPU_CACHE.get("ts", 0.0) < 2.0:
         return dict(_GPU_CACHE["value"])
 
-    name = _gpu_windows_registry_name()
+    adapters = _windows_adapters_cached()
+    name, discrete = _pick_gpu(adapters)
+    if not name:
+        # Список адаптеров недоступен (или пуст): берём имя из WinSAT.
+        name = _gpu_windows_registry_name()
+        discrete = _gpu_rank(name) >= 25
+    name = name or "GPU"
+
+    # Дискретная NVIDIA — сразу nvidia-smi: она отдаёт точное имя и загрузку
+    # именно этой карты, а не сумму по всем адаптерам (на ноутбуках PDH
+    # показывает встроенную, которая рисует рабочий стол).
+    if discrete and _gpu_vendor(name) == "nvidia":
+        smi = _gpu_nvidia()
+        if smi.get("percent") is not None:
+            smi["vendor"] = "nvidia"
+            smi["source"] = "nvidia-smi"
+            smi["discrete"] = True
+            smi["adapters"] = adapters
+            _GPU_SOURCE[0] = "nvidia-smi"
+            _GPU_CACHE["value"] = smi
+            _GPU_CACHE["ts"] = now
+            return dict(smi)
+
     result = _gpu_windows_pdh()
     if result.get("percent") is not None:
         result["name"] = name
         result["vendor"] = _gpu_vendor(name)
         result["source"] = "pdh"
+        result["discrete"] = discrete
+        result["adapters"] = adapters
         _GPU_SOURCE[0] = "pdh"
         _GPU_CACHE["value"] = result
         _GPU_CACHE["ts"] = now
@@ -518,11 +625,13 @@ def _gpu_windows() -> Dict[str, Any]:
         return dict(legacy["value"])
     if now - _GPU_FAIL_TS[0] < 30.0:
         return {"percent": None, "name": name, "vendor": _gpu_vendor(name),
-                "source": "none"}
+                "source": "none", "discrete": discrete, "adapters": adapters}
     smi = _gpu_nvidia()
     if smi.get("percent") is not None:
         smi["vendor"] = "nvidia"
         smi["source"] = "nvidia-smi"
+        smi["discrete"] = True
+        smi["adapters"] = adapters
         _GPU_SOURCE[0] = "nvidia-smi"
         _GPU_CACHE["legacy"] = {"value": smi, "ts": now}
         _GPU_CACHE["value"] = smi
@@ -540,7 +649,8 @@ def _gpu_windows() -> Dict[str, Any]:
         return dict(adl)
 
     _GPU_FAIL_TS[0] = now
-    return {"percent": None, "name": name, "vendor": _gpu_vendor(name), "source": "none"}
+    return {"percent": None, "name": name, "vendor": _gpu_vendor(name),
+            "source": "none", "discrete": discrete, "adapters": adapters}
 
 
 def _gpu_macos() -> Dict[str, Any]:
@@ -562,7 +672,14 @@ def _gpu_macos() -> Dict[str, Any]:
         return {"percent": None, "name": "Apple GPU"}
 
 
+_SMI_CACHE: Dict[str, Any] = {"value": None, "ts": 0.0}
+_SMI_TTL = 4.0
+
+
 def _gpu_nvidia() -> Dict[str, Any]:
+    now = time.monotonic()
+    if _SMI_CACHE["value"] and now - float(_SMI_CACHE["ts"]) < _SMI_TTL:
+        return dict(_SMI_CACHE["value"])
     exe = "nvidia-smi"
     try:
         out = subprocess.run([exe, "--query-gpu=utilization.gpu,memory.used,memory.total,name",
@@ -572,9 +689,25 @@ def _gpu_nvidia() -> Dict[str, Any]:
             return {"percent": None, "name": ""}
         first = out.stdout.strip().splitlines()[0]
         parts = [p.strip() for p in first.split(",")]
-        return {"percent": int(float(parts[0])), "name": parts[3] if len(parts) > 3 else "GPU"}
+        value = {"percent": int(float(parts[0])), "name": parts[3] if len(parts) > 3 else "GPU"}
+        _SMI_CACHE.update({"value": value, "ts": now})
+        return dict(value)
     except Exception:
         return {"percent": None, "name": ""}
+
+
+def adapters() -> Dict[str, Any]:
+    """Список видеокарт без опроса загрузки — для окна настроек.
+
+    На ноутбуках адаптеров два, и человек хочет видеть, что приложение нашло
+    обе карты, а не только встроенную.
+    """
+    if _platform() != "win32":
+        return {"list": [], "picked": "", "discrete": ""}
+    names = _windows_adapters_cached()
+    picked, is_discrete = _pick_gpu(names)
+    return {"list": names, "picked": picked,
+            "discrete": picked if is_discrete else ""}
 
 
 def gpu(force: bool = False) -> Dict[str, Any]:

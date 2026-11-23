@@ -8,11 +8,15 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict
 
-from . import db, live, pipeline
+from . import db, live, pipeline, resources
 from .config import MAX_WORKERS
 
 _project_pool = ThreadPoolExecutor(max_workers=max(1, MAX_WORKERS), thread_name_prefix="project")
-_clip_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="clip")
+# Размер пула фиксирован (его нельзя менять на ходу), а фактическое число
+# параллельных рендеров ограничивает шлагбаум по «мощности» из настроек.
+_clip_pool = ThreadPoolExecutor(max_workers=max(1, resources.max_render_workers()),
+                                thread_name_prefix="clip")
+_clip_gate = resources.ConcurrencyGate(resources.render_workers)
 _lock = threading.Lock()
 _clip_running: set[str] = set()
 
@@ -121,7 +125,8 @@ def submit_rerender(clip_id: str, payload: Dict[str, Any]) -> bool:
 
     def work() -> None:
         try:
-            pipeline.rerender_clip(clip_id, payload)
+            with _clip_gate:
+                pipeline.rerender_clip(clip_id, payload)
         except Exception as exc:  # noqa: BLE001
             previous_ready = (previous["status"] == "ready" and previous.get("path")
                               and Path(previous["path"]).is_file())

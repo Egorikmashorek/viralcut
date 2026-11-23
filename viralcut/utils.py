@@ -150,6 +150,50 @@ def extract_asr_audio(src: Path, dst: Path, sample_rate: int = 16000, *,
     return dst
 
 
+def iter_audio_mono(src: Path, sample_rate: int = 16000, *,
+                    audio_track: Optional[int] = None,
+                    block_seconds: float = 30.0) -> Any:
+    """Отдаёт аудио кусками по block_seconds секунд (float32 [-1, 1]).
+
+    Часовое видео целиком — это ~230 МБ float32 в памяти, а трёхчасовое уже
+    ~700 МБ: на машинах с 8 ГБ приложение вылетало на анализе. Потоковое
+    чтение держит в памяти один блок (~2 МБ) и не зависит от длины файла.
+    """
+    import numpy as np
+
+    cmd = [ffmpeg(), "-v", "error", "-i", str(src), "-vn", "-ac", "1",
+           "-ar", str(sample_rate), "-f", "s16le"]
+    if audio_track is not None:
+        cmd += ["-map", f"0:a:{audio_track}"]
+    cmd += ["-"]
+    block_bytes = max(2, int(block_seconds * sample_rate) * 2)
+    # выравниваем по кадру, чтобы блоки стыковались без «щелчка» на границе
+    block_bytes -= block_bytes % 4
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            **subprocess_kwargs())
+    try:
+        while True:
+            chunk = proc.stdout.read(block_bytes) if proc.stdout else b""
+            if not chunk:
+                break
+            if len(chunk) % 2:
+                chunk = chunk[:-1]  # неполный сэмпл: дочитаем со следующим блоком
+            yield np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+    finally:
+        try:
+            if proc.stdout:
+                proc.stdout.close()
+        finally:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+
+
 def read_audio_mono(src: Path, sample_rate: int = 16000, *,
                     audio_track: Optional[int] = None) -> Any:
     """Возвращает numpy-массив float32 [-1, 1] с аудио."""

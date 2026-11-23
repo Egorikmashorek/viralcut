@@ -285,16 +285,23 @@ def energy_curve(media: Path, hop: float = 0.25, *,
     try:
         import numpy as np
 
-        audio = utils.read_audio_mono(media, audio_track=audio_track)
         sr = 16000
         n = max(1, int(hop * sr))
-        frames = len(audio) // n
-        if frames == 0:
+        values: List[float] = []
+        carry = np.zeros(0, dtype=np.float32)
+        # Читаем аудио блоками: часовое видео целиком — это сотни мегабайт,
+        # на длинных исходниках приложение из-за этого вылетало.
+        for block in utils.iter_audio_mono(media, audio_track=audio_track):
+            data = np.concatenate((carry, block)) if carry.size else block
+            frames = len(data) // n
+            if frames:
+                trimmed = data[: frames * n].reshape(frames, n)
+                rms = np.sqrt(np.mean(trimmed ** 2, axis=1) + 1e-12)
+                values.extend(float(x) for x in 20 * np.log10(np.maximum(rms, 1e-6)))
+            carry = data[frames * n:] if frames else data
+        if not values:
             return [], -60.0
-        trimmed = audio[: frames * n].reshape(frames, n)
-        rms = np.sqrt(np.mean(trimmed ** 2, axis=1) + 1e-12)
-        db = 20 * np.log10(np.maximum(rms, 1e-6))
-        return [float(x) for x in db], float(np.mean(db))
+        return values, float(np.mean(values))
     except Exception:
         return [], -30.0
 
@@ -947,15 +954,49 @@ def _reaction_segments(features: Dict[str, Any], kind: str) -> List[Dict[str, fl
 def audio_reactions(media: Path, *, audio_track: Optional[int] = None) -> Dict[str, List[Dict[str, float]]]:
     """Смех и аплодисменты в дорожке: отрезки {start, end, score}."""
     empty: Dict[str, List[Dict[str, float]]] = {"laughter": [], "applause": []}
-    try:
-        audio = utils.read_audio_mono(Path(media), _SR, audio_track=audio_track)
-    except Exception:  # noqa: BLE001 — нет звука/файла: реакций просто нет
-        return empty
-    features = _frame_features(audio)
+    features = _stream_features(Path(media), audio_track=audio_track)
     if not features:
         return empty
     return {"laughter": _reaction_segments(features, "laughter"),
             "applause": _reaction_segments(features, "applause")}
+
+
+def _stream_features(media: Path, *,
+                     audio_track: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """Покадровые признаки по блокам, без загрузки всего аудио в память.
+
+    Хвост блока переносим в следующий, поэтому кадры идут подряд без сдвига
+    времени: на трёхчасовом видео это экономит ~700 МБ памяти.
+    """
+    try:
+        import numpy as np
+    except Exception:  # noqa: BLE001
+        return None
+    parts: Dict[str, List[Any]] = {"rms": [], "flatness": [], "high_ratio": [], "zcr": []}
+    carry = None
+    try:
+        for block in utils.iter_audio_mono(media, _SR, audio_track=audio_track):
+            data = np.concatenate((carry, block)) if carry is not None and len(carry) else block
+            chunk = _frame_features(data)
+            if chunk is None:
+                carry = data
+                continue
+            frames = len(chunk["rms"])
+            for key in parts:
+                parts[key].append(chunk[key])
+            # всё, что не попало в последний кадр, переносим в следующий блок
+            carry = data[frames * _HOP:]
+    except Exception:  # noqa: BLE001 — нет звука/файла: реакций просто нет
+        return None
+    if not parts["rms"]:
+        return None
+    return {
+        "rms": np.concatenate(parts["rms"]),
+        "flatness": np.concatenate(parts["flatness"]),
+        "high_ratio": np.concatenate(parts["high_ratio"]),
+        "zcr": np.concatenate(parts["zcr"]),
+        "sec_per_frame": _HOP / _SR,
+    }
 
 
 def _overlap_seconds(start: float, end: float, segments: List[Dict[str, float]]) -> float:

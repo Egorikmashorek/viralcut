@@ -4,7 +4,8 @@
   * encoder — "auto" | "gpu" | "cpu": чем кодировать клипы;
   * download_dir — куда складывать скачанные исходники;
   * clips_dir — куда сохранять готовые клипы;
-  * ask_folder — спрашивать папку при каждом сохранении.
+  * ask_folder — спрашивать папку при каждом сохранении;
+  * power — 0..100, сколько мощности машины отдавать обработке.
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ DEFAULTS: Dict[str, Any] = {
     "download_dir": "",
     "clips_dir": "",
     "ask_folder": True,
+    "power": 50,                # 0 — экономно, 100 — максимум
 }
 _LOCK = threading.Lock()
 
@@ -73,5 +75,10 @@ def update(patch: Dict[str, Any]) -> Dict[str, Any]:
                 data[key] = value
         if "ask_folder" in patch:
             data["ask_folder"] = bool(patch["ask_folder"])
+        if "power" in patch:
+            try:
+                data["power"] = max(0, min(100, int(patch["power"])))
+            except (TypeError, ValueError):
+                pass
         _save(data)
     return get()

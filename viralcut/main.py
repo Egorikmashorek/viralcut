@@ -41,6 +41,7 @@ class SettingsIn(BaseModel):
     download_dir: Optional[str] = None
     clips_dir: Optional[str] = None
     ask_folder: Optional[bool] = None
+    power: Optional[int] = Field(None, ge=0, le=100)
 
 
 class UpdateSettingsIn(BaseModel):
@@ -320,6 +321,13 @@ def settings_get() -> Dict[str, Any]:
 
     data = app_settings.get()
     data["hw_available"] = render.hw_encoder()
+    data["limits"] = resources.summary()
+    try:
+        from . import system_stats
+
+        data["gpus"] = system_stats.adapters()
+    except Exception:  # noqa: BLE001 — список карт не критичен для настроек
+        data["gpus"] = {"list": [], "picked": "", "discrete": ""}
     return data
 
 
@@ -329,6 +337,10 @@ def settings_set(body: SettingsIn) -> Dict[str, Any]:
 
     patch = {k: v for k, v in body.model_dump().items() if v is not None}
     data = app_settings.update(patch)
+    # новый уровень мощности применяется сразу: шлагбаум рендеров читает его
+    # из настроек на каждой задаче, а кэш сбрасываем, чтобы не ждать секунду
+    resources.invalidate()
+    data["limits"] = resources.summary()
     # выбор энкодера применяем сразу: кэш пробного кадра сбрасываем
     render.reset_hw_encoder()
     data["hw_available"] = render.hw_encoder()

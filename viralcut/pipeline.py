@@ -510,16 +510,29 @@ def process_project(pid: str) -> None:
             if info["audio_tracks"] > 1:
                 # У субтитров площадки нет привязки к выбранной звуковой дорожке.
                 raise RuntimeError("Не удалось распознать выбранную аудиодорожку. " + str(exc)[:300]) from exc
+            wanted = (opts.get("language") or "ru").lower()[:2]
             sub_path = downloader.fetch_subtitles(project["url"], workdir,
-                                                  browser=opts.get("cookies_browser") or None)
+                                                  browser=opts.get("cookies_browser") or None,
+                                                  language=wanted)
             if sub_path:
                 segs = utils.parse_vtt(Path(sub_path))
                 if segs:
-                    transcript = {"language": "ru", "duration": duration, "segments": segs,
+                    # Язык берём из имени файла, а не «ru по умолчанию»: иначе
+                    # английские субтитры подписывались как русские.
+                    actual = Path(sub_path).stem.split(".")[-1].lower() or wanted
+                    if actual[:2] != wanted:
+                        print(f"[subs] субтитров на «{wanted}» нет, взял «{actual}»",
+                              file=sys.stderr, flush=True)
+                    transcript = {"language": actual, "duration": duration, "segments": segs,
                                   "engine": "source-subtitles"}
             if transcript is None:
                 raise RuntimeError("Не удалось распознать речь. " + str(exc)[:300]) from exc
 
+        asked = (opts.get("language") or "").lower()[:2]
+        got = (transcript.get("language") or "").lower()[:2]
+        if asked and got and asked != got:
+            print(f"[whisper] просили {asked!r}, распознано {got!r} — показываю фактический",
+                  file=sys.stderr, flush=True)
         _update(pid, language=transcript.get("language"))
         db.merge_meta(pid, {
             "engine": transcript.get("engine"),

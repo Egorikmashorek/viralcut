@@ -653,25 +653,58 @@ def _gpu_windows() -> Dict[str, Any]:
             "source": "none", "discrete": discrete, "adapters": adapters}
 
 
-def _gpu_macos() -> Dict[str, Any]:
+def _macos_gpu_name() -> str:
+    """Имя видеокарты: на Intel Mac это AMD/Intel, и его нет в ioreg-счётчиках.
+
+    `system_profiler` небыстрый, поэтому имя кэшируем на 10 минут: в виджете
+    оно нужно только для подписи.
+    """
+    now = time.monotonic()
+    cached = _MAC_GPU_NAME.get("value")
+    if cached and now - float(_MAC_GPU_NAME.get("ts") or 0.0) < 600.0:
+        return cached
+    name = ""
     try:
+        out = subprocess.run(["system_profiler", "SPDisplaysDataType"],
+                             capture_output=True, text=True, timeout=8, **_spawn()).stdout
+        found = re.findall(r"Chipset Model:\s*(.+)", out or "")
+        if found:
+            # на Intel Mac с дискретной картой первой идёт встроенная — берём
+            # самую «мощную» по ранжиру
+            name = max((n.strip() for n in found), key=_gpu_rank)
+    except Exception:  # noqa: BLE001
+        name = ""
+    if name:
+        _MAC_GPU_NAME.update({"value": name, "ts": now})
+    return name
+
+
+def _gpu_macos() -> Dict[str, Any]:
+    name = ""
+    percent = None
+    try:
+        # Apple Silicon: AGXAccelerator, Intel Mac: IOAccelerator (AMD/Intel GPU)
         out = subprocess.run(["ioreg", "-r", "-d", "1", "-w", "0", "-c", "AGXAccelerator"],
                              capture_output=True, text=True, timeout=4, **_spawn()).stdout
         if not out:
             out = subprocess.run(["ioreg", "-r", "-d", "1", "-w", "0", "-c", "IOAccelerator"],
                                  capture_output=True, text=True, timeout=4, **_spawn()).stdout
         m = re.search(r'"Device Utilization %"=(\d+)', out)
-        if not m:
-            return {"percent": None, "name": "Apple GPU"}
-        model = ""
+        if m:
+            percent = int(m.group(1))
         mm = re.search(r'"model"\s*=\s*"([^"]+)"', out)
         if mm:
-            model = mm.group(1)
-        return {"percent": int(m.group(1)), "name": model or "Apple GPU"}
-    except Exception:
-        return {"percent": None, "name": "Apple GPU"}
+            name = mm.group(1).strip()
+    except Exception:  # noqa: BLE001
+        percent = None
+    if not name:
+        name = _macos_gpu_name() or ("Apple GPU" if _platform() == "darwin" else "GPU")
+    vendor = _gpu_vendor(name)
+    return {"percent": percent, "name": name, "vendor": vendor,
+            "discrete": vendor in ("amd", "nvidia"), "source": "ioreg"}
 
 
+_MAC_GPU_NAME: Dict[str, Any] = {"value": "", "ts": 0.0}
 _SMI_CACHE: Dict[str, Any] = {"value": None, "ts": 0.0}
 _SMI_TTL = 4.0
 

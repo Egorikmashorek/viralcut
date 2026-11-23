@@ -563,16 +563,45 @@ def download_file(url: str, dest_dir: Path, progress: ProgressCb = None) -> Dict
             "height": None}
 
 
-def fetch_subtitles(url: str, dest_dir: Path, browser: Optional[str] = None) -> Optional[str]:
+_SUB_LANG_ORDER = ("ru", "uk", "kk", "en")
+
+
+def pick_subtitle_file(files: List[Path], language: str = "ru") -> Optional[str]:
+    """Выбирает файл субтитров по языку, а не по алфавиту.
+
+    Раньше брали sorted()[0]: `subs.en.vtt` сортируется раньше `subs.ru.vtt`,
+    поэтому русские ролики получали английские субтитры (и это ещё подписывалось
+    как «Русский»). Теперь сначала ищем нужный язык, потом родственные, и только
+    если ничего не нашлось — любой файл.
+    """
+    if not files:
+        return None
+    wanted = (language or "ru").lower()[:2]
+
+    def lang_of(path: Path) -> str:
+        parts = path.stem.split(".")
+        return parts[-1].lower() if len(parts) > 1 else ""
+
+    for candidate in (wanted, *_SUB_LANG_ORDER):
+        for path in files:
+            if lang_of(path) == candidate:
+                return str(path)
+    return str(sorted(files)[0])
+
+
+def fetch_subtitles(url: str, dest_dir: Path, browser: Optional[str] = None,
+                    language: str = "ru") -> Optional[str]:
     """Пробует скачать готовые субтитры (ru/en) — резервный путь без Whisper."""
     import yt_dlp
 
     ensure_path()
+    langs = [language] if language else []
+    langs += [code for code in _SUB_LANG_ORDER if code not in langs]
     opts: Dict[str, Any] = {
         "skip_download": True,
         "writesubtitles": True,
         "writeautomaticsub": True,
-        "subtitleslangs": ["ru", "en"],
+        "subtitleslangs": langs,
         "subtitlesformat": "vtt",
         "outtmpl": str(dest_dir / "subs.%(ext)s"),
         "quiet": True,
@@ -588,9 +617,10 @@ def fetch_subtitles(url: str, dest_dir: Path, browser: Optional[str] = None) -> 
                 ydl.download([url])
         except Exception:  # noqa: BLE001
             continue
-        files = sorted(dest_dir.glob("subs*.vtt"))
-        if files:
-            return str(files[0])
+        files = list(dest_dir.glob("subs*.vtt"))
+        chosen = pick_subtitle_file(files, language)
+        if chosen:
+            return chosen
     return None
 
 

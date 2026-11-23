@@ -22,6 +22,7 @@ _APP_VERSION = _read_version()
 
 import glob
 import shutil
+import os
 import sys
 from pathlib import Path
 
@@ -34,7 +35,7 @@ datas = [("web", "web"), ("assets", "assets")]
 
 # Node + PO-провайдер для HD с YouTube. На Windows архив собирается отдельно,
 # без него приложение работает, но YouTube может ограничиться 360p.
-vendor = Path("desktop/vendor.tar.gz")
+vendor = Path(os.environ.get("VIRALCUT_VENDOR_TARBALL") or "desktop/vendor.tar.gz")
 if vendor.is_file():
     datas.append((str(vendor), "bundle"))
 

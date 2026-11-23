@@ -128,6 +128,7 @@ class WindowsFallbackTest(unittest.TestCase):
              mock.patch.object(ss, "_gpu_nvidia", return_value={"percent": None, "name": ""}), \
              mock.patch.object(ss, "_gpu_windows_adl",
                                return_value={"percent": 55, "name": "AMD Radeon", "vendor": "amd"}), \
+             mock.patch.object(ss, "_windows_adapters_cached", return_value=[]), \
              mock.patch.object(ss, "_gpu_windows_registry_name", return_value="AMD Radeon RX 6800"):
             data = ss.gpu(force=True)
         self.assertEqual(data["percent"], 55)
@@ -140,6 +141,7 @@ class WindowsFallbackTest(unittest.TestCase):
              mock.patch.object(ss, "_gpu_nvidia",
                                return_value={"percent": 41, "name": "NVIDIA GeForce RTX 3060"}), \
              mock.patch.object(ss, "_gpu_windows_adl") as adl, \
+             mock.patch.object(ss, "_windows_adapters_cached", return_value=[]), \
              mock.patch.object(ss, "_gpu_windows_registry_name", return_value="NVIDIA GeForce RTX 3060"):
             data = ss.gpu(force=True)
         adl.assert_not_called()
@@ -151,6 +153,7 @@ class WindowsFallbackTest(unittest.TestCase):
         with mock.patch.object(ss, "_platform", return_value="win32"), \
              mock.patch.object(ss, "_gpu_windows_pdh",
                                return_value={"percent": 17, "name": "GPU", "adapters": 1}), \
+             mock.patch.object(ss, "_windows_adapters_cached", return_value=[]), \
              mock.patch.object(ss, "_gpu_windows_registry_name",
                                return_value="Intel(R) Iris Xe Graphics"):
             data = ss.gpu(force=True)
@@ -164,6 +167,7 @@ class WindowsFallbackTest(unittest.TestCase):
              mock.patch.object(ss, "_gpu_windows_pdh", return_value={"percent": None, "name": ""}), \
              mock.patch.object(ss, "_gpu_nvidia", return_value={"percent": None, "name": ""}), \
              mock.patch.object(ss, "_gpu_windows_adl", return_value={"percent": None, "name": "", "vendor": "amd"}), \
+             mock.patch.object(ss, "_windows_adapters_cached", return_value=[]), \
              mock.patch.object(ss, "_gpu_windows_registry_name", return_value="Microsoft Basic Display Adapter"):
             data = ss.gpu(force=True)
         self.assertIsNone(data["percent"])

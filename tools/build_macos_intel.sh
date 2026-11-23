@@ -31,8 +31,10 @@ if [ -d "$VENDOR_SRC" ]; then
     cp -R "$VENDOR_SRC/ejs" build/vendor-x64/ 2>/dev/null || true
     cp -R "$VENDOR_SRC/pot" build/vendor-x64/ 2>/dev/null || true
     cp "$NODE_X64" build/vendor-x64/node
-    tar czf "$VENDOR_TAR" -C build/vendor-x64 node ejs pot
-    export VIRALCUT_VENDOR_TARBALL="$VENDOR_TAR"
+    # имя внутри бандла должно быть vendor.tar.gz: его ищет desktop/main.py
+    rm -rf build/vendor-bundle && mkdir -p build/vendor-bundle
+    tar czf build/vendor-bundle/vendor.tar.gz -C build/vendor-x64 node ejs pot
+    export VIRALCUT_VENDOR_TARBALL="$PWD/build/vendor-bundle/vendor.tar.gz"
     echo "Vendor для Intel: $VENDOR_TAR"
   else
     echo "ВНИМАНИЕ: node x64 не задан (VIRALCUT_NODE_X64) — приложение соберётся без POT-провайдера."

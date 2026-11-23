@@ -2110,3 +2110,35 @@ input[type="range"]::-webkit-slider-thumb {
 .ai-section .set-row { display: flex; gap: 8px; align-items: center; }
 .ai-section .set-row .set-select { flex: 1; }
 .ai-section .set-row .btn-ghost { flex: none; white-space: nowrap; }
+
+/* ---------- ИИ-режим на главном экране ---------- */
+
+.ai-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px dashed rgba(139, 92, 246, 0.35);
+  background: rgba(139, 92, 246, 0.06);
+  margin: 14px 0 4px;
+}
+.ai-mode.on {
+  border-style: solid;
+  border-color: rgba(139, 92, 246, 0.65);
+  box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.25) inset;
+}
+.ai-mode .ai-prompt {
+  width: 100%;
+  resize: vertical;
+  min-height: 54px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.ai-mode .ai-prompt:focus { outline: none; border-color: rgba(139, 92, 246, 0.65); }
+.ai-mode:not(.on) .ai-prompt { opacity: 0.55; }

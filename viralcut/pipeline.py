@@ -41,6 +41,10 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     "sub_free": None,
     "force_hd": False,
     "cut_pauses": False,
+    # ИИ-режим: модель сама выбирает вирусные моменты по заданию пользователя
+    "ai_mode": False,
+    "ai_prompt": "",
+    "autostart": False,
 }
 
 
@@ -97,6 +101,9 @@ def normalize_options(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         opts["audio_track"] = 0
     opts["force_hd"] = bool(opts.get("force_hd"))
+    opts["ai_mode"] = bool(opts.get("ai_mode"))
+    opts["ai_prompt"] = str(opts.get("ai_prompt") or "")[:600]
+    opts["autostart"] = bool(opts.get("autostart"))
     opts["language"] = str(opts.get("language") or "auto")
     if opts["language"] == "auto":
         opts["language"] = ""
@@ -448,6 +455,10 @@ def prepare_project(pid: str) -> None:
             res_txt = f"{info['height']}p"
         _update(pid, status="review", progress=100, error=None,
                 stage=f"Видео готово ({res_txt}{took_txt}) · настройте субтитры")
+        if opts.get("autostart"):
+            from . import jobs
+
+            jobs.submit_process(pid)
     except Cancelled:
         _update(pid, status="cancelled", stage="Загрузка отменена", error=None)
     except Exception as exc:  # noqa: BLE001
@@ -539,14 +550,43 @@ def process_project(pid: str) -> None:
             "segments": len(transcript.get("segments") or []),
         })
 
-        progress(0.55, "Поиск вирусных моментов")
-        found = analyze.find_segments(
-            transcript["segments"], source, duration,
-            count=opts["count"] or 0,
-            min_dur=opts["min_dur"], max_dur=opts["max_dur"],
-            target_dur=opts["target_dur"],
-            audio_track=audio_track,
-        )
+        found: List[Dict[str, Any]] = []
+        if opts.get("ai_mode"):
+            progress(0.55, "ИИ выбирает вирусные моменты")
+            try:
+                from . import ai as ai_module
+
+                if not ai_module.configured():
+                    raise ai_module.AIError(
+                        "Не настроен ключ ИИ — включите его в настройках или выключите ИИ-режим.")
+                plan = ai_module.plan_clips(
+                    transcript["segments"], duration,
+                    options={"count": opts["count"], "min_dur": opts["min_dur"],
+                             "max_dur": opts["max_dur"]},
+                    instruction=opts.get("ai_prompt") or "",
+                )
+                found = _ai_found(plan["clips"], transcript["segments"])
+                db.merge_meta(pid, {"ai_model": plan.get("model"),
+                                    "ai_took": plan.get("took"),
+                                    "ai_clips": len(found),
+                                    "ai_instruction": plan.get("instruction") or ""})
+                print(f"[ai] моментов от модели: {len(found)} ({plan.get('model')})",
+                      file=sys.stderr, flush=True)
+            except Exception as exc:  # noqa: BLE001 — ИИ не должен ломать нарезку
+                traceback.print_exc()
+                db.merge_meta(pid, {"ai_error": str(exc)[:300]})
+                print(f"[ai] план не получен: {str(exc)[:200]} — беру эвристику",
+                      file=sys.stderr, flush=True)
+                found = []
+        if not found:
+            progress(0.55, "Поиск вирусных моментов")
+            found = analyze.find_segments(
+                transcript["segments"], source, duration,
+                count=opts["count"] or 0,
+                min_dur=opts["min_dur"], max_dur=opts["max_dur"],
+                target_dur=opts["target_dur"],
+                audio_track=audio_track,
+            )
         if not found:
             raise RuntimeError("Не нашлось связных фрагментов. Попробуйте увеличить длину клипа.")
 
@@ -649,6 +689,52 @@ def run_project(pid: str) -> None:
     if not project or project.get("status") != "review":
         return
     process_project(pid)
+
+
+def _words_between(segments: List[Dict[str, Any]], start: float,
+                   end: float) -> List[Dict[str, Any]]:
+    """Слова из расшифровки, попавшие в границы клипа."""
+    words: List[Dict[str, Any]] = []
+    for seg in segments or []:
+        if not isinstance(seg, dict):
+            continue
+        seg_start = float(seg.get("start") or 0.0)
+        seg_end = float(seg.get("end") or 0.0)
+        if seg_end <= start or seg_start >= end:
+            continue
+        for word in seg.get("words") or []:
+            if not isinstance(word, dict):
+                continue
+            try:
+                ws = float(word.get("start") or 0.0)
+                we = float(word.get("end") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if we <= start or ws >= end:
+                continue
+            token = str(word.get("word") or "").strip()
+            if token:
+                words.append({"word": token, "start": round(max(ws, start), 3),
+                              "end": round(min(we, end), 3)})
+    return words
+
+
+def _ai_found(plan: List[Dict[str, Any]], segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """План ИИ → тот же формат, что даёт эвристика analyze.find_segments."""
+    found: List[Dict[str, Any]] = []
+    for item in plan:
+        start = float(item.get("start") or 0.0)
+        end = float(item.get("end") or 0.0)
+        if end - start < 3.0:
+            continue
+        words = _words_between(segments, start, end)
+        hook = str(item.get("hook") or "").strip()
+        title = str(item.get("title") or "").strip() or hook or "Момент"
+        caption = str(item.get("caption") or "").strip()
+        found.append({"start": round(start, 2), "end": round(end, 2), "score": 1.0,
+                      "title": title, "hook": hook, "caption": caption,
+                      "words": words, "parts": {"ai": 1.0}})
+    return found
 
 
 def _pause_spans(source: Path, start: float, end: float, *,

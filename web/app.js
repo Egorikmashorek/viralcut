@@ -256,8 +256,11 @@ const state = {
     subSpeed: "calm",
     cutPauses: false,
     cookies: "",
+    aiMode: false,
+    aiPrompt: "",
     fontTarget: "#fontSelect"
-  }
+  },
+  ai: null
 };
 
 /* ---------------- API ---------------- */
@@ -363,6 +366,16 @@ function heroHTML() {
         <span class="source-services">YouTube, Twitch, TikTok, Instagram, VK</span>
       </div>
       <div class="hero-note">Для Twitch укажите ссылку на запись или клип. Идущая трансляция открывается на вкладке «Прямой эфир».</div>
+    </div>
+    <div class="ai-mode ${o.aiMode ? "on" : ""}" id="aiModeCard">
+      <label class="toggle ai-toggle">
+        <input type="checkbox" id="aiModeToggle" ${o.aiMode ? "checked" : ""}/>
+        <span class="track"></span>
+        <span><b>ИИ-режим</b> — модель сама выберет вирусные моменты</span>
+      </label>
+      <textarea id="aiPrompt" class="ai-prompt" rows="2" maxlength="600"
+        placeholder="Например: нарежь самые вирусные моменты, сделай цепляюще, без вступлений">${esc(o.aiPrompt || "")}</textarea>
+      <div class="set-hint" id="aiModeHint">${aiModeHint()}</div>
     </div>
     <div class="group-title"><span>Параметры нарезки</span><span class="group-hint">Можно поменять позже</span></div>
     <div class="options">
@@ -496,6 +509,28 @@ function bindHero() {
   const cut = $("#cutPausesToggle");
   if (cut) cut.addEventListener("change", () => { state.opts.cutPauses = cut.checked; });
 
+  const aiToggle = $("#aiModeToggle");
+  const aiCard = $("#aiModeCard");
+  if (aiToggle) {
+    const syncAi = () => {
+      state.opts.aiMode = aiToggle.checked;
+      if (aiCard) aiCard.classList.toggle("on", aiToggle.checked);
+    };
+    aiToggle.addEventListener("change", async () => {
+      syncAi();
+      if (aiToggle.checked) {
+        const ai = state.ai || (await loadAiStatus());
+        if (!ai || !ai.configured) {
+          toast("Сначала добавьте ключ ИИ в настройках", "err");
+          openSettings();
+        }
+      }
+    });
+    syncAi();
+  }
+  const aiPrompt = $("#aiPrompt");
+  if (aiPrompt) aiPrompt.addEventListener("input", () => { state.opts.aiPrompt = aiPrompt.value; });
+
   const cookies = $("#cookiesSelect");
   if (cookies) cookies.addEventListener("change", () => { state.opts.cookies = cookies.value; });
 
@@ -537,6 +572,26 @@ function bindHero() {
   if (uploadBtn) uploadBtn.addEventListener("click", () => $("#fileInput").click());
 }
 
+function aiModeHint() {
+  const ai = state.ai;
+  if (!ai) return "Проверяю настройки ИИ…";
+  if (!ai.configured) {
+    return "Ключ ИИ не задан — включите его в «Настройках → ИИ-помощник», иначе нарезка пойдёт обычным алгоритмом.";
+  }
+  return `Модель: ${esc(ai.model || "")} (${esc(ai.provider || "")}). Моменты, хуки и подписи выберет ИИ, клипы соберутся сами.`;
+}
+
+async function loadAiStatus() {
+  try {
+    state.ai = await api("/api/ai");
+  } catch (e) {
+    state.ai = { configured: false };
+  }
+  const hint = $("#aiModeHint");
+  if (hint) hint.textContent = aiModeHint();
+  return state.ai;
+}
+
 function heroOptions() {
   const d = DUR_PRESETS[state.opts.dur] || DUR_PRESETS["20-45"];
   return {
@@ -555,7 +610,10 @@ function heroOptions() {
     sub_speed: state.opts.subSpeed,
     cut_pauses: state.opts.cutPauses,
     language: state.opts.language || "auto",
-    cookies_browser: state.opts.cookies
+    cookies_browser: state.opts.cookies,
+    ai_mode: Boolean(state.opts.aiMode),
+    ai_prompt: state.opts.aiPrompt || "",
+    autostart: Boolean(state.opts.aiMode)
   };
 }
 
@@ -2954,6 +3012,7 @@ async function withRetry(fn, tries = 4, delay = 500) {
   }
 
   try { await loadFontCatalog(); } catch (e) { console.error(e); }
+  try { await loadAiStatus(); } catch (e) { console.error(e); }
 
   try {
     await withRetry(() => loadProjects(), 4, 600);

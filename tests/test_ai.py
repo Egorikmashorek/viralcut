@@ -173,5 +173,57 @@ class ModelsTest(unittest.TestCase):
         self.assertEqual([m["id"] for m in result["models"]], ["deepseek-chat", "deepseek-reasoner"])
 
 
+class PlanTest(unittest.TestCase):
+    def test_transcript_has_timecodes(self):
+        text = ai._transcript_for_prompt([
+            {"start": 0, "end": 3.5, "text": "Привет"},
+            {"start": 4, "end": 9, "text": "  Как   дела "},
+        ])
+        self.assertIn("[0.0-3.5] Привет", text)
+        self.assertIn("[4.0-9.0] Как дела", text)
+
+    def test_parse_plan_from_fenced_json(self):
+        items = ai._parse_json_clips('```json\n{"clips":[{"start":1,"end":9}]}\n```')
+        self.assertEqual(items[0]["end"], 9)
+
+    def test_parse_plan_plain_array(self):
+        items = ai._parse_json_clips('[{"start":2,"end":12}]')
+        self.assertEqual(len(items), 1)
+
+    def test_parse_plan_garbage_raises(self):
+        with self.assertRaises(ai.AIError):
+            ai._parse_json_clips("никакого json тут нет")
+
+    def test_normalize_clamps_and_removes_overlap(self):
+        plan = ai._normalize_plan(
+            [{"start": -5, "end": 2}, {"start": 5, "end": 80}, {"start": 10, "end": 20}],
+            duration=40, min_dur=15, max_dur=60, count=5)
+        self.assertGreaterEqual(plan[0]["start"], 0.0)
+        self.assertLessEqual(plan[-1]["end"], 40.0)
+        for left, right in zip(plan, plan[1:]):
+            self.assertGreaterEqual(right["start"], left["end"] - 0.3)
+
+    def test_normalize_limits_count(self):
+        plan = ai._normalize_plan(
+            [{"start": i * 10, "end": i * 10 + 8} for i in range(20)],
+            duration=300, min_dur=5, max_dur=20, count=3)
+        self.assertLessEqual(len(plan), 3)
+
+    def test_hook_and_caption_trimmed(self):
+        plan = ai._normalize_plan(
+            [{"start": 0, "end": 10, "hook": "х" * 200, "caption": "с" * 400}],
+            duration=20, min_dur=5, max_dur=20, count=1)
+        self.assertLessEqual(len(plan[0]["hook"]), 90)
+        self.assertLessEqual(len(plan[0]["caption"]), 220)
+
+    def test_plan_clips_without_key_raises(self):
+        tmp = Path(tempfile.mkdtemp()) / "settings.json"
+        with mock.patch.object(settings, "SETTINGS_FILE", tmp):
+            settings.update({"ai_key": ""})
+            with self.assertRaises(ai.AIError) as ctx:
+                ai.plan_clips([{"start": 0, "end": 5, "text": "тест"}], 10, {}, "нарежь")
+        self.assertIn("Не задан ключ", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

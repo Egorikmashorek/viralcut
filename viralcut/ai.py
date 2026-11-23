@@ -297,6 +297,173 @@ def build_prompt(project: Dict[str, Any], clip: Optional[Dict[str, Any]] = None)
     ]
 
 
+PLAN_LIMIT_CHARS = 16000
+PLAN_SCHEMA_EXAMPLE = (
+    '{"clips":[{"start":12.5,"end":34.0,"hook":"ОН СДЕЛАЛ ЭТО ЗА НЕДЕЛЮ",'
+    '"title":"Почему успел за неделю","caption":"Собрали продукт за 7 дней — вот что вышло"}]}'
+)
+
+
+def _transcript_for_prompt(segments: List[Dict[str, Any]]) -> str:
+    """Компактная расшифровка с таймкодами: модель должна видеть, где что сказано."""
+    lines: List[str] = []
+    for index, seg in enumerate(segments or []):
+        if not isinstance(seg, dict):
+            continue
+        try:
+            start = float(seg.get("start") or 0.0)
+            end = float(seg.get("end") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        text = " ".join(str(seg.get("text") or "").split())
+        if not text:
+            continue
+        lines.append((index, f"[{start:.1f}-{end:.1f}] {text}"))
+    def joined(items: List[tuple]) -> str:
+        return "\n".join(line for _, line in items)
+    result = joined(lines)
+    if len(result) <= PLAN_LIMIT_CHARS:
+        return result
+    # длинная запись: режем реплики, при необходимости — через одну с пометкой
+    shorted = [(i, (f"[{line.split(']')[0][1:]}] " + line.split("] ", 1)[1][:90])
+                if "] " in line else line[:110]) for i, line in lines]
+    result = joined(shorted)
+    if len(result) <= PLAN_LIMIT_CHARS:
+        return result
+    thinned = [item for item in shorted if item[0] % 2 == 0]
+    result = joined(thinned)
+    return result[:PLAN_LIMIT_CHARS] + "\n…(расшифровка сокращена)"
+
+
+def _parse_json_clips(text: str) -> List[Dict[str, Any]]:
+    """Достаёт JSON из ответа модели: бывает в ```json и с пояснениями вокруг."""
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+    candidates: List[str] = []
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(cleaned[start:end + 1])
+    start = cleaned.find("[")
+    end = cleaned.rfind("]")
+    if start != -1 and end > start:
+        candidates.append(cleaned[start:end + 1])
+    for raw in candidates:
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(data, dict):
+            data = data.get("clips") or data.get("moments") or []
+        if not isinstance(data, list):
+            continue
+        items = [item for item in data if isinstance(item, dict)]
+        if items:  # пустой список — пробуем следующий вариант разбора
+            return items
+    raise AIError("ИИ вернул ответ, который не удалось разобрать как список моментов.")
+
+
+def _normalize_plan(items: List[Dict[str, Any]], duration: float,
+                    min_dur: float, max_dur: float, count: int) -> List[Dict[str, Any]]:
+    """Приводит ответ модели к безопасным границам: в кадре и без наложений."""
+    limit = max(1, min(int(count or 10), 12))
+    low = max(3.0, float(min_dur or 15) * 0.5)
+    high = max(low + 1.0, float(max_dur or 60) + 5.0)
+    usable = []
+    for item in items:
+        try:
+            start = float(item.get("start"))
+            end = float(item.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if duration > 0:
+            start = max(0.0, min(start, duration - 1.0))
+            end = max(0.0, min(end, duration))
+        if end - start < low:
+            end = min(duration or end, start + max(low, 8.0))
+        if end - start > high:
+            end = start + high
+        if end - start < 3.0:
+            continue
+        hook = " ".join(str(item.get("hook") or "").split())[:90]
+        title = " ".join(str(item.get("title") or "").split())[:110]
+        caption = " ".join(str(item.get("caption") or "").split())[:220]
+        usable.append({"start": round(start, 2), "end": round(end, 2),
+                       "hook": hook, "title": title, "caption": caption})
+    usable.sort(key=lambda c: c["start"])
+    result: List[Dict[str, Any]] = []
+    for candidate in usable:
+        if result and candidate["start"] < result[-1]["end"] - 0.3:
+            # наложение: сдвигаем начало, чтобы клипы не пересекались
+            candidate["start"] = round(result[-1]["end"] + 0.2, 2)
+            if candidate["end"] - candidate["start"] < 3.0:
+                continue
+        result.append(candidate)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def plan_clips(segments: List[Dict[str, Any]], duration: float,
+               options: Optional[Dict[str, Any]] = None,
+               instruction: str = "") -> Dict[str, Any]:
+    """Просит модель выбрать вирусные моменты и вернуть их с хуками.
+
+    Возвращает границы клипов в секундах и подписи. Никаких правок в проекте
+    не делает — применение остаётся за pipeline.
+    """
+    conf = _conf()
+    api_key = key()
+    if not api_key:
+        raise AIError("Не задан ключ ИИ. Откройте настройки → «ИИ-помощник» и вставьте ключ.")
+    if not conf["base"] or not conf["model"]:
+        raise AIError("Не выбран провайдер или модель ИИ. Проверьте настройки.")
+    options = options or {}
+    count = max(1, min(int(options.get("count") or 8), 12))
+    min_dur = float(options.get("min_dur") or 15)
+    max_dur = float(options.get("max_dur") or 60)
+    transcript = _transcript_for_prompt(segments)
+    if not transcript.strip():
+        raise AIError("Расшифровка пустая — выбирать моменты не из чего.")
+    user_text = (
+        f"Задание от пользователя: {instruction.strip() or 'нарежь самые вирусные моменты'}\n"
+        f"Длительность записи: {float(duration):.0f} сек.\n"
+        f"Сделай не больше {count} клипов. Длина каждого от {min_dur:.0f} до {max_dur:.0f} сек.\n"
+        "Выбирай моменты, которые цепляют с первой секунды: конфликт, цифра, обещание, "
+        "неожиданный вывод, эмоция. Не начинай с приветствия, не режь посреди слова.\n"
+        "Хук — первая строка на экране: 3–7 слов, без точки в конце.\n"
+        "Верни ТОЛЬКО JSON по схеме, без пояснений:\n"
+        f"{PLAN_SCHEMA_EXAMPLE}\n\n"
+        "Расшифровка с таймкодами:\n" + transcript
+    )
+    payload = {
+        "model": conf["model"],
+        "messages": [
+            {"role": "system", "content": "Ты — редактор вирусных вертикальных видео. "
+                                          "Отвечай только JSON."},
+            {"role": "user", "content": user_text},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 1600,
+    }
+    started = time.time()
+    data = _post(f"{conf['base']}/chat/completions", payload, api_key)
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise AIError("Сервер ИИ вернул ответ без текста.") from exc
+    clips = _normalize_plan(_parse_json_clips(str(content or "")), float(duration or 0.0),
+                            min_dur, max_dur, count)
+    if not clips:
+        raise AIError("ИИ не предложил ни одного подходящего момента — попробуйте другую модель "
+                      "или измените задание.")
+    return {"clips": clips, "model": conf["model"], "provider": conf["provider"],
+            "took": round(time.time() - started, 2), "instruction": instruction.strip()}
+
+
 def advice(project: Dict[str, Any], clip: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Совет по проекту/клипу. Бросает AIError с понятным текстом."""
     conf = _conf()

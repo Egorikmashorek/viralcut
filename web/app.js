@@ -1130,6 +1130,7 @@ function resultsHTML() {
     <div class="project-actions">
       ${ready.length ? `<a class="btn-primary" href="/api/projects/${project.id}/zip" data-download-zip="${project.id}" style="display:inline-flex;align-items:center;gap:7px">${ICONS.zip} Скачать всё</a>` : ""}
       <button class="btn-ghost" data-action="folder" title="Открыть папку с готовыми MP4">${ICONS.folder} Открыть папку</button>
+      ${ready.length ? `<button class="btn-ghost" data-action="ai-advice" title="Подсказки по хуку, таймингу и субтитрам">${ICONS.spark} Совет ИИ</button>` : ""}
       ${ready.length ? `<button class="btn-ghost" data-action="smart-all">Пересобрать в умный кроп</button>` : ""}
       <button class="btn-ghost" data-action="save-source" title="Сохранить скачанное видео в выбранную папку">${ICONS.download} Сохранить видео</button>
       <button class="btn-ghost" data-action="home">${ICONS.back} Новый</button>
@@ -1254,6 +1255,12 @@ $("#main").addEventListener("click", async (e) => {
     clearTimeout(state.pollTimer);
     renderMain(true);
     renderSidebar();
+    return;
+  }
+
+  if (action === "ai-advice") {
+    if (!state.detail) return;
+    openAiAdvice(state.detail.project);
     return;
   }
 
@@ -2289,6 +2296,53 @@ function gpuPreferenceHint(preference) {
   return "Система решает сама: обычно встроенная карта, пока не нужна дискретная.";
 }
 
+const AI_PROVIDER_ORDER = ["deepseek", "polza", "openai", "custom"];
+const AI_FALLBACK_MODELS = {
+  deepseek: ["deepseek-chat", "deepseek-reasoner"],
+  polza: ["openai/gpt-4o-mini", "openai/gpt-4o", "deepseek/deepseek-chat"],
+  openai: ["gpt-4o-mini", "gpt-4o"],
+  custom: [],
+};
+
+function aiProviderButtons(current, providers) {
+  const known = providers && providers.length ? providers : [];
+  const list = known.length
+    ? known
+    : AI_PROVIDER_ORDER.map((key) => ({ key, label: key }));
+  return list.map((p) => `<button data-val="${esc(p.key)}" class="${current === p.key ? "active" : ""}">${esc(p.label)}</button>`).join("");
+}
+
+function aiProviderHint(conf) {
+  const note = conf.ai && conf.ai.note ? `${esc(conf.ai.note)} ` : "";
+  if ((conf.ai_provider || "deepseek") === "custom") {
+    return `${note}Укажите базовый URL OpenAI-совместимого сервера, например http://127.0.0.1:11434/v1.`;
+  }
+  return `${note}Запросы уходят с вашим ключом напрямую провайдеру. Без ключа кнопка «Совет ИИ» не работает.`;
+}
+
+async function loadAiModels(selected) {
+  const select = $("#setAiModel");
+  if (!select) return;
+  const provider = (window.__aiProvider || "deepseek");
+  const fallback = AI_FALLBACK_MODELS[provider] || [];
+  try {
+    const data = await api(`/api/ai/models?provider=${encodeURIComponent(provider)}`);
+    const models = (data.models || []).slice(0, 400);
+    if (!models.length) throw new Error("пусто");
+    select.innerHTML = models.map((m) =>
+      `<option value="${esc(m.id)}" ${m.id === selected ? "selected" : ""}>${esc(m.name || m.id)}</option>`).join("");
+    if (selected && !models.some((m) => m.id === selected)) {
+      select.insertAdjacentHTML("afterbegin", `<option value="${esc(selected)}" selected>${esc(selected)}</option>`);
+    }
+  } catch (err) {
+    select.innerHTML = (fallback.length ? fallback : [selected].filter(Boolean))
+      .map((id) => `<option value="${esc(id)}" ${id === selected ? "selected" : ""}>${esc(id)}</option>`).join("");
+    if (!fallback.length) {
+      select.insertAdjacentHTML("afterbegin", `<option value="${esc(selected || "")}" selected>${esc(selected || "модель не выбрана")}</option>`);
+    }
+  }
+}
+
 function gpuListHint(gpus) {
   if (!gpus || !Array.isArray(gpus.list) || !gpus.list.length) return "";
   const names = gpus.list.map((name) => esc(name)).join(", ");
@@ -2316,9 +2370,63 @@ function powerHint(limits) {
   return parts.length ? `Сейчас: ${parts.join(" · ")}${cpu}.` : "Лимиты применятся к следующей задаче.";
 }
 
+async function openAiAdvice(project) {
+  $("#modal").innerHTML = `
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-panel workbench advice-panel" role="dialog" aria-modal="true" aria-labelledby="adviceTitle">
+      <div class="modal-head">
+        <h3 id="adviceTitle">Совет ИИ</h3>
+        <button class="icon-btn" data-close aria-label="Закрыть">${ICONS.close}</button>
+      </div>
+      <div class="modal-body advice-body">
+        <div class="advice-loading" id="adviceBody"><span class="spinner"></span> Думаю над клипом…</div>
+        <div class="set-hint advice-hint">
+          Модель смотрит на субтитры клипа и тайминги. Хук, тайминг и разбивку
+          применяйте вручную — приложение ничего не меняет само.
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn-ghost" data-close>Закрыть</button>
+        <button class="btn-ghost" id="adviceCopy">Скопировать</button>
+      </div>
+    </div>`;
+  $("#modal").classList.remove("hidden");
+  const body = $("#adviceBody");
+  let text = "";
+  try {
+    const data = await api("/api/ai/advice", {
+      method: "POST",
+      body: JSON.stringify({ project_id: project.id }),
+    });
+    text = data.advice || "";
+    body.classList.remove("advice-loading");
+    body.innerHTML = text.split("\n").map((line) => `<p>${esc(line)}</p>`).join("");
+    body.insertAdjacentHTML("beforeend",
+      `<div class="set-hint">Модель: ${esc(data.model || "")} · ${esc(String(data.took || ""))} с</div>`);
+  } catch (err) {
+    const message = String(err.message || err);
+    body.classList.remove("advice-loading");
+    body.innerHTML = `<div class="error-box">${esc(message)}</div>`;
+    if (/ключ|настройк/i.test(message)) {
+      body.insertAdjacentHTML("afterbegin",
+        `<div class="set-hint">Откройте «Настройки → ИИ-помощник» и вставьте ключ DeepSeek (или выберите другого провайдера).</div>`);
+    }
+  }
+  const copy = $("#adviceCopy");
+  if (copy) copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Совет скопирован");
+    } catch (e) {
+      toast("Не удалось скопировать", "err");
+    }
+  });
+}
+
 async function openSettings() {
   let conf = { encoder: "auto", download_dir: "", clips_dir: "", ask_folder: true,
-               hw_available: null, power: 50, cpu_limit: 100, gpu_preference: "auto" };
+               hw_available: null, power: 50, cpu_limit: 100, gpu_preference: "auto",
+               ai_provider: "deepseek", ai_model: "", ai_key_set: false, ai: null };
   try { conf = await api("/api/settings"); } catch (e) { console.error(e); }
   const modes = [["auto", "Авто"], ["gpu", "Видеокарта"], ["cpu", "Процессор"]];
   $("#modal").innerHTML = `
@@ -2361,6 +2469,25 @@ async function openSettings() {
           </div>
           <div class="power-scale"><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div>
           <div class="set-hint" id="setCpuLimitHint">${cpuLimitHint(conf.cpu_limit ?? 100, conf.cpu_cap)}</div>
+        </div>
+        <div class="form-card set-section ai-section">
+          <h4>ИИ-помощник</h4>
+          <div class="set-seg" id="setAiProvider">
+            ${aiProviderButtons(conf.ai_provider || "deepseek", conf.ai && conf.ai.providers)}
+          </div>
+          <div class="set-hint" id="setAiProviderHint">${aiProviderHint(conf)}</div>
+          <label class="set-label" for="setAiModel">Модель</label>
+          <select id="setAiModel" class="set-select">
+            <option value="${esc(conf.ai_model || "")}">${esc(conf.ai_model || "Загрузка…")}</option>
+          </select>
+          <label class="set-label" for="setAiKey">API-ключ</label>
+          <input type="password" id="setAiKey" class="set-input" autocomplete="off" spellcheck="false"
+                 placeholder="${conf.ai_key_set ? "ключ сохранён — оставьте пустым, чтобы не менять" : "вставьте ключ"}" />
+          <div class="set-hint">
+            ${conf.ai_key_set ? `Ключ сохранён${conf.ai && conf.ai.key_hint ? ` (${esc(conf.ai.key_hint)})` : ""}. ` : ""}
+            ${conf.ai && conf.ai.key_url ? `<a href="${esc(conf.ai.key_url)}" target="_blank" rel="noopener">Получить ключ</a>. ` : ""}
+            Запрос уходит на сервер провайдера только по кнопке «Совет ИИ».
+          </div>
         </div>
         <div class="form-card set-section paths-section">
           <h4>Папки сохранения</h4>
@@ -2420,6 +2547,22 @@ async function openSettings() {
     };
     cpuInput.addEventListener("input", syncCpu);
   }
+  window.__aiProviders = (conf.ai && conf.ai.providers) || null;
+  window.__aiProvider = conf.ai_provider || "deepseek";
+  let aiProvider = conf.ai_provider || "deepseek";
+  $$("#setAiProvider button").forEach((b) => b.addEventListener("click", () => {
+    if (aiProvider === b.dataset.val) return;
+    aiProvider = b.dataset.val;
+    window.__aiProvider = aiProvider;
+    $$("#setAiProvider button").forEach((x) => x.classList.toggle("active", x === b));
+    const hint = $("#setAiProviderHint");
+    if (hint) hint.textContent = aiProviderHint({ ...conf, ai_provider: aiProvider });
+    const modelSelect = $("#setAiModel");
+    if (modelSelect) modelSelect.innerHTML = `<option value="">Загрузка…</option>`;
+    loadAiModels("");
+  }));
+  loadAiModels(conf.ai_model || "");
+
   let gpuPreference = conf.gpu_preference || "auto";
   $$("#setGpuPref button").forEach((b) => b.addEventListener("click", () => {
     gpuPreference = b.dataset.val;
@@ -2450,18 +2593,21 @@ async function openSettings() {
     const btn = $("#setSave");
     btn.disabled = true;
     try {
-      const saved = await api("/api/settings", {
-        method: "POST",
-        body: JSON.stringify({
-          encoder,
-          download_dir: $("#setDownloadDir").value.trim(),
-          clips_dir: $("#setClipsDir").value.trim(),
-          ask_folder: $("#setAskFolder").checked,
-          power: Number($("#setPower").value),
-          cpu_limit: Number($("#setCpuLimit").value),
-          gpu_preference: gpuPreference,
-        }),
-      });
+      const payload = {
+        encoder,
+        download_dir: $("#setDownloadDir").value.trim(),
+        clips_dir: $("#setClipsDir").value.trim(),
+        ask_folder: $("#setAskFolder").checked,
+        power: Number($("#setPower").value),
+        cpu_limit: Number($("#setCpuLimit").value),
+        gpu_preference: gpuPreference,
+        ai_provider: aiProvider,
+        ai_model: $("#setAiModel") ? $("#setAiModel").value : "",
+      };
+      // пустое поле = «не менять ключ», иначе сохранение стирало бы его
+      const aiKey = ($("#setAiKey")?.value || "").trim();
+      if (aiKey) payload.ai_key = aiKey;
+      const saved = await api("/api/settings", { method: "POST", body: JSON.stringify(payload) });
       closeModal();
       if (saved.encoder_warning) toast(saved.encoder_warning, "err");
       else toast("Настройки сохранены");

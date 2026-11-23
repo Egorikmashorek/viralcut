@@ -14,8 +14,9 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import (cpu_limit, custom_fonts, db, gpu_pref, jobs, pipeline, render,
-               resources, settings as app_settings, system_stats, transcribe, utils)
+from . import (ai, cpu_limit, custom_fonts, db, gpu_pref, jobs, pipeline,
+               render, resources, settings as app_settings, system_stats,
+               transcribe, utils)
 from ._version import __version__
 from .config import ASSETS_DIR, DATA_DIR, PROJECTS_DIR, WEB_DIR, ffmpeg
 
@@ -36,6 +37,11 @@ class PipIn(BaseModel):
     radius: Optional[int] = None
 
 
+class AdviceIn(BaseModel):
+    project_id: str
+    clip_id: Optional[str] = None
+
+
 class SettingsIn(BaseModel):
     encoder: Optional[str] = None
     download_dir: Optional[str] = None
@@ -44,6 +50,10 @@ class SettingsIn(BaseModel):
     power: Optional[int] = Field(None, ge=0, le=100)
     cpu_limit: Optional[int] = Field(None, ge=25, le=100)
     gpu_preference: Optional[str] = None
+    ai_provider: Optional[str] = None
+    ai_base: Optional[str] = None
+    ai_model: Optional[str] = None
+    ai_key: Optional[str] = None
 
 
 class UpdateSettingsIn(BaseModel):
@@ -327,10 +337,11 @@ def project_frame(pid: str, t: float = 0.0, width: int = 900) -> FileResponse:
 def settings_get() -> Dict[str, Any]:
     from . import settings as app_settings
 
-    data = app_settings.get()
+    data = app_settings.public(app_settings.get())
     data["hw_available"] = render.hw_encoder()
     data["limits"] = resources.summary()
     data["cpu_cap"] = cpu_limit.status()
+    data["ai"] = ai.status()
     try:
         from . import system_stats
 
@@ -355,15 +366,57 @@ def settings_set(body: SettingsIn) -> Dict[str, Any]:
         gpu_pref.apply()
     except Exception:  # noqa: BLE001
         traceback.print_exc()
-    render.reset_hw_encoder()
+    data = app_settings.public(data)
     data["limits"] = resources.summary()
     data["cpu_cap"] = cpu_limit.status()
-    # выбор энкодера применяем сразу: кэш пробного кадра сбрасываем
-    render.reset_hw_encoder()
+    data["ai"] = ai.status()
     data["hw_available"] = render.hw_encoder()
     if sys.platform == "win32" and data["encoder"] == "gpu" and not data["hw_available"]:
         data["encoder_warning"] = "Аппаратный кодировщик недоступен. Клипы будут кодироваться на процессоре."
     return data
+
+
+@app.get("/api/ai")
+def ai_status() -> Dict[str, Any]:
+    """Провайдер, модель и есть ли ключ (сам ключ не отдаём)."""
+    return ai.status()
+
+
+@app.get("/api/ai/models")
+def ai_models(force: bool = False, provider: Optional[str] = None) -> Dict[str, Any]:
+    """Список моделей провайдера — для выпадающего списка в настройках."""
+    try:
+        return ai.models(force=force, provider=provider)
+    except ai.AIError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/ai/advice")
+def ai_advice(body: AdviceIn) -> Dict[str, Any]:
+    """Совет по проекту или конкретному клипу — по кнопке в интерфейсе."""
+    project = db.get_project(body.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Проект не найден")
+    clip = None
+    if body.clip_id:
+        clip = db.get_clip(body.clip_id)
+        if not clip or clip.get("project_id") != body.project_id:
+            raise HTTPException(status_code=404, detail="Клип не найден")
+    clips = db.list_clips(body.project_id)
+    if clip is None and clips:
+        # без выбранного клипа советуем по самому сильному по оценке
+        clip = max(clips, key=lambda item: float(item.get("score") or 0.0))
+    payload: Dict[str, Any] = {
+        "title": project.get("title"),
+        "language": project.get("language"),
+        "duration": project.get("duration"),
+        "clips": [{"start": c.get("start"), "end": c.get("end"),
+                   "score": c.get("score")} for c in clips],
+    }
+    try:
+        return ai.advice(payload, clip)
+    except ai.AIError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/system")

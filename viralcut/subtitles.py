@@ -515,8 +515,13 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
         advance = _char_advance(info, size)
         widest = max((len(" ".join(tokens[i] for i in group)) for group in line_groups),
                      default=0)
-        width_px = widest * advance * _SHRINK_RESERVE
-        shrink = max(0.6, _SAFE_WIDTH / width_px) if width_px > _SAFE_WIDTH else 1.0
+        width_px = widest * advance
+        # Длинное слово перенести нельзя: его строка почти наверняка вылезет за
+        # края, если libass подставит более широкий системный шрифт.
+        longest_word = max((len(token) for token in tokens), default=0)
+        shrink = 1.0
+        if width_px > _SAFE_WIDTH or longest_word > chars:
+            shrink = max(0.6, _SAFE_WIDTH / (width_px * _SHRINK_RESERVE))
         size_tag = f"\\fs{max(40, int(round(size * shrink)))}" if shrink < 0.995 else ""
         fade_limit = max(0, round((cue_end - cue_start) * 200))
         tags = (f"\\fad({min(fade_in, fade_limit)},{min(fade_out, fade_limit)})"

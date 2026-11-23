@@ -739,6 +739,22 @@ def main() -> None:
         """Метка этапа запуска: по логу видно, где именно приложение остановилось."""
         print(f"[boot] {stage}", flush=True)
 
+    # жёсткий потолок процессора и выбор видеокарты — до тяжёлых этапов
+    try:
+        from viralcut import cpu_limit as _cpu_limit
+
+        applied = _cpu_limit.apply()
+        print(f"[boot] лимит процессора: {applied}%", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[boot] лимит процессора не применён: {exc}", flush=True)
+    try:
+        from viralcut import gpu_pref as _gpu_pref
+
+        info = _gpu_pref.apply()
+        print(f"[boot] видеокарта: {info.get('preference')} ({info.get('mechanism')})", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[boot] предпочтение видеокарты не применено: {exc}", flush=True)
+
     boot("самопроверка")
     try:
         _startup_selfcheck()

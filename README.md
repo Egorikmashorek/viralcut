@@ -36,13 +36,17 @@
 
 ## Скачать
 
-| Платформа | Файл | Что внутри |
-|---|---|---|
-| **macOS 12+** (Apple Silicon) | `ViralCut-<версия>-macOS-arm64.zip` | Модель Whisper, ffmpeg, шрифты, PO-провайдер. Распакуйте и откройте `ViralCut.app` |
-| **Windows 10/11** (x64), без установки | `ViralCut-<версия>-windows-x64-portable.zip` | Python, зависимости, ffmpeg, модель Whisper, Node.js. Распакуйте весь архив и запустите `ViralCut.bat` |
-| **Windows 10/11** (x64), сборка GitHub Actions | `ViralCut-<версия>-windows-x64.zip` | `ViralCut.exe`, модель Whisper, ffmpeg, шрифты |
+| Платформа | Файл | Размер | Что внутри |
+|---|---|---|---|
+| **macOS 12+** (Apple Silicon) | [`ViralCut-1.5.10.dmg`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.10.dmg) | 637 МБ | Модель Whisper, ffmpeg, шрифты, PO-провайдер. Перетащить в «Программы» |
+| **macOS, ZIP** | [`ViralCut-1.5.10-macOS-arm64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.10-macOS-arm64.zip) | 618 МБ | То же в архиве |
+| **Windows 10/11 x64** | [`ViralCut-1.5.10-windows-x64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.10-windows-x64.zip) | 642 МБ | `ViralCut.exe`, модель Whisper, ffmpeg, шрифты |
+| **Windows, без установки** | [`ViralCut-1.5.10-windows-x64-portable.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.10-windows-x64-portable.zip) | 690 МБ | Python и зависимости внутри: распаковать и запустить `ViralCut.bat` |
 
-Список архивов и контрольные суммы доступны в разделе [последнего релиза](https://github.com/vanwild11/viralcut/releases/latest).
+Актуальный релиз — **[1.5.10](https://github.com/vanwild11/viralcut/releases/latest)**:
+в нём исправлен запуск на Windows (приложение больше не закрывается молча) и
+субтитры, которые выходили за края кадра. Контрольные суммы — в
+`SHA256SUMS-1.5.10.txt` рядом с файлами релиза.
 
 ## Почему ViralCut
 

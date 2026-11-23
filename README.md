@@ -38,14 +38,11 @@
 
 | Платформа | Файл | Что внутри |
 |---|---|---|
-| **macOS 12+** (Apple Silicon) | [`ViralCut-1.5.8.dmg`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.8.dmg) · ~639 МБ | Модель Whisper, ffmpeg, шрифты, PO-провайдер. Перетащить в «Программы» |
-| **macOS, ZIP** | [`ViralCut-1.5.8-macOS-arm64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.8-macOS-arm64.zip) · ~618 МБ | То же в архиве |
-| **Windows 10/11** (x64), без установки | [`ViralCut-1.5.8-windows-x64-portable.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.8-windows-x64-portable.zip) · ~683 МБ | Python, зависимости, ffmpeg, модель Whisper — распаковать и запустить `ViralCut.bat` |
-| **Windows 10/11** (x64), классическая сборка | [`ViralCut-1.5.8-windows-x64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.8-windows-x64.zip) · ~642 МБ | `ViralCut.exe`, модель Whisper, ffmpeg, шрифты |
+| **macOS 12+** (Apple Silicon) | `ViralCut-<версия>-macOS-arm64.zip` | Модель Whisper, ffmpeg, шрифты, PO-провайдер. Распакуйте и откройте `ViralCut.app` |
+| **Windows 10/11** (x64), без установки | `ViralCut-<версия>-windows-x64-portable.zip` | Python, зависимости, ffmpeg, модель Whisper, Node.js. Распакуйте весь архив и запустите `ViralCut.bat` |
+| **Windows 10/11** (x64), сборка GitHub Actions | `ViralCut-<версия>-windows-x64.zip` | `ViralCut.exe`, модель Whisper, ffmpeg, шрифты |
 
-> Актуальный релиз **1.5.8**. Windows-сборки собирает GitHub Actions (со smoke-тестом
-> `/api/system`), macOS-архив собран и подписан ad-hoc. Контрольные суммы — в
-> `SHA256SUMS-1.5.8.txt` рядом с файлами релиза.
+Список архивов и контрольные суммы доступны в разделе [последнего релиза](https://github.com/vanwild11/viralcut/releases/latest).
 
 ## Почему ViralCut
 
@@ -182,7 +179,7 @@ videotoolbox/nvenc/qsv, рендер молча идёт на libx264.
 
 ### Windows 10/11
 
-Скачайте [`ViralCut-1.5.8-windows-x64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.8-windows-x64.zip), распакуйте и запустите `ViralCut.exe`.
+Скачайте переносимый ZIP из [последнего релиза](https://github.com/vanwild11/viralcut/releases/latest), распакуйте весь архив и запустите `ViralCut.bat`.
 Если Python нет и вы запускаете из исходников — используйте `install_windows.bat`
 (поставит Python 3.12 и WebView2 через winget).
 Подробнее: [docs/WINDOWS.md](docs/WINDOWS.md).
@@ -191,7 +188,7 @@ videotoolbox/nvenc/qsv, рендер молча идёт на libx264.
 
 #### Готовое приложение
 
-Скачайте [`ViralCut-1.5.8-macOS-arm64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.8-macOS-arm64.zip) из раздела **Releases** (≈620 МБ; внутри модели и все зависимости, после установки ничего не докачивается).
+Скачайте ZIP для Apple Silicon из [последнего релиза](https://github.com/vanwild11/viralcut/releases/latest). Архив включает модель Whisper и зависимости.
 
 1. Распакуйте и перетащите `ViralCut.app` в «Программы».
 2. Запустите — откроется своё окно, браузер не нужен.
@@ -243,7 +240,7 @@ videotoolbox/nvenc/qsv, рендер молча идёт на libx264.
 | Платформа | Команда | Результат |
 |---|---|---|
 | **macOS** | `./build_app.sh` | `dist/ViralCut.app` |
-| **Windows 10/11** | `powershell -ExecutionPolicy Bypass -File build_windows.ps1` | `release\ViralCut-1.5.8-windows-x64.zip` |
+| **Windows 10/11** | `powershell -ExecutionPolicy Bypass -File build_windows.ps1` | `release\ViralCut-<версия>-windows-x64.zip` |
 | **Любая ОС** | `./run.sh` | сервер на `http://127.0.0.1:8765` |
 
 Сборка воспроизводится в **GitHub Actions** ([workflow](.github/workflows/build.yml)):

@@ -38,18 +38,19 @@
 
 | Платформа | Файл | Размер | Что внутри |
 |---|---|---|---|
-| **macOS 12+** (Apple Silicon) | [`ViralCut-1.5.13.dmg`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.13.dmg) | 637 МБ | Модель Whisper, ffmpeg, шрифты, PO-провайдер |
-| **macOS 12+** (Intel) | [`ViralCut-1.5.13-intel.dmg`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.13-intel.dmg) | 691 МБ | То же для Intel Mac, считает на дискретной карте |
-| **Windows 10/11 x64** | [`ViralCut-1.5.13-windows-x64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.13-windows-x64.zip) | 642 МБ | `ViralCut.exe`, модель, ffmpeg, шрифты |
-| **Windows, без установки** | [`ViralCut-1.5.13-windows-x64-portable.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.13-windows-x64-portable.zip) | 690 МБ | Python и зависимости внутри: распаковать и запустить `ViralCut.bat` |
+| **macOS 12+** (Apple Silicon) | [`ViralCut-1.5.18.dmg`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.18.dmg) | 637 МБ | Модель Whisper, ffmpeg, шрифты, PO-провайдер |
+| **macOS 12+** (Intel) | [`ViralCut-1.5.18-intel.dmg`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.18-intel.dmg) | 691 МБ | То же для Intel Mac, считает на дискретной карте |
+| **Windows 10/11 x64** | [`ViralCut-1.5.18-windows-x64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.18-windows-x64.zip) | 642 МБ | `ViralCut.exe`, модель, ffmpeg, шрифты |
+| **Windows, без установки** | [`ViralCut-1.5.18-windows-x64-portable.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.18-windows-x64-portable.zip) | 690 МБ | Python и зависимости внутри: распаковать и запустить `ViralCut.bat` |
 
-ZIP-варианты для macOS: [`arm64`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.13-macOS-arm64.zip) и
-[`x86_64`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.13-macOS-x86_64.zip).
+ZIP-варианты для macOS: [`arm64`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.18-macOS-arm64.zip) и
+[`x86_64`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.18-macOS-x86_64.zip).
 
-Актуальный релиз — **[1.5.13](https://github.com/vanwild11/viralcut/releases/latest)**:
-лимит загрузки процессора, выбор встроенной или дискретной видеокарты, субтитры
-на языке ролика и сборка для Intel Mac. Контрольные суммы — в
-`SHA256SUMS-1.5.13.txt` рядом с файлами релиза.
+Актуальный релиз — **[1.5.18](https://github.com/vanwild11/viralcut/releases/latest)**:
+ИИ-агент, который выполняет задания по шагам, ИИ-режим нарезки, помощник внутри
+приложения, любая модель (DeepSeek, Polza.ai, OpenAI, локальная Ollama) и
+жёсткие лимиты на процессор и видеокарту. Контрольные суммы — в
+`SHA256SUMS-1.5.18.txt` рядом с файлами релиза.
 
 ## Почему ViralCut
 

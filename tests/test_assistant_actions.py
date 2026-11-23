@@ -71,8 +71,9 @@ class ValidateTest(unittest.TestCase):
         self.assertEqual(parsed[0]["cpu_limit"], 100)
         self.assertEqual(parsed[0]["power"], 0)
 
-    def test_start_cut_requires_target(self):
-        self.assertEqual(actions.validate([{"type": "start_cut"}]), [])
+    def test_start_cut_without_target_applies_to_open_project(self):
+        # цель может прийти из контекста (открытый проект) — валидатор не режет
+        self.assertEqual(actions.validate([{"type": "start_cut"}])[0]["type"], "start_cut")
         parsed = actions.validate([{"type": "start_cut", "url": "https://x"}])
         self.assertEqual(parsed[0]["url"], "https://x")
 

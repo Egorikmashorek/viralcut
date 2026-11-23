@@ -38,6 +38,14 @@ PROVIDERS: Dict[str, Dict[str, str]] = {
         "model": "gpt-4o-mini",
         "key_url": "https://platform.openai.com/api-keys",
     },
+    "local": {
+        "label": "Локальная модель",
+        "base": "http://127.0.0.1:11434/v1",
+        "model": "qwen2.5",
+        "key_url": "",
+        "note": "Ollama или LM Studio на этом компьютере: данные не покидают машину.",
+        "keyless": "1",
+    },
     "custom": {
         "label": "Свой сервер",
         "base": "",
@@ -101,9 +109,39 @@ def _conf() -> Dict[str, str]:
             "label": preset["label"], "key_url": preset["key_url"]}
 
 
+def _keyless(provider: str) -> bool:
+    """Локальным серверам ключ не нужен."""
+    return bool(PROVIDERS.get(provider, {}).get("keyless"))
+
+
 def configured() -> bool:
     conf = _conf()
+    if _keyless(conf["provider"]):
+        return bool(conf["base"] and conf["model"])
     return bool(key() and conf["base"] and conf["model"])
+
+
+def local_server(base: Optional[str] = None) -> Dict[str, Any]:
+    """Ищет локальный OpenAI-совместимый сервер (Ollama, LM Studio)."""
+    candidates = [base] if base else [
+        "http://127.0.0.1:11434/v1",   # Ollama
+        "http://127.0.0.1:1234/v1",    # LM Studio
+        "http://127.0.0.1:8080/v1",    # llama.cpp / vLLM
+    ]
+    for url in candidates:
+        if not url:
+            continue
+        try:
+            request = urllib.request.Request(f"{url.rstrip('/')}/models", method="GET")
+            with urllib.request.urlopen(request, timeout=2) as response:
+                data = json.loads(response.read().decode("utf-8", "replace"))
+        except Exception:  # noqa: BLE001
+            continue
+        raw = data.get("data") if isinstance(data, dict) else None
+        models = [str(item.get("id")) for item in (raw or []) if isinstance(item, dict)]
+        if models:
+            return {"available": True, "base": url, "models": models[:50]}
+    return {"available": False, "base": "", "models": []}
 
 
 def status() -> Dict[str, Any]:
@@ -416,7 +454,7 @@ def plan_clips(segments: List[Dict[str, Any]], duration: float,
     не делает — применение остаётся за pipeline.
     """
     conf = _conf()
-    api_key = key()
+    api_key = key() or ("local" if _keyless(conf["provider"]) else "")
     if not api_key:
         raise AIError("Не задан ключ ИИ. Откройте настройки → «ИИ-помощник» и вставьте ключ.")
     if not conf["base"] or not conf["model"]:
@@ -468,7 +506,7 @@ def chat(messages: List[Dict[str, str]], *, max_tokens: int = 700,
          temperature: float = 0.3) -> Dict[str, Any]:
     """Универсальный запрос к выбранной модели (используется помощником)."""
     conf = _conf()
-    api_key = key()
+    api_key = key() or ("local" if _keyless(conf["provider"]) else "")
     if not api_key:
         raise AIError("Не задан ключ ИИ.")
     if not conf["base"] or not conf["model"]:
@@ -489,7 +527,7 @@ def chat(messages: List[Dict[str, str]], *, max_tokens: int = 700,
 def advice(project: Dict[str, Any], clip: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Совет по проекту/клипу. Бросает AIError с понятным текстом."""
     conf = _conf()
-    api_key = key()
+    api_key = key() or ("local" if _keyless(conf["provider"]) else "")
     if not api_key:
         raise AIError("Не задан ключ ИИ. Откройте настройки → «ИИ-помощник» и вставьте ключ.")
     if not conf["base"] or not conf["model"]:

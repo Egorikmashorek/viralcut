@@ -2594,6 +2594,16 @@ async function askAssistant(raw) {
     pending.remove();
     assistantMsg("bot", data.answer || "Пустой ответ.");
     if (data.hint) assistantMsg("note", data.hint);
+    const steps = (data.steps || []).filter((step) => (step.actions || []).length);
+    if (steps.length > 1 || (steps.length === 1 && data.source === "ai")) {
+      const lines = [];
+      steps.forEach((step) => {
+        (step.actions || []).forEach((action) => {
+          lines.push(`${action.ok ? "✓" : "✗"} ${action.type}: ${String(action.message || "").slice(0, 90)}`);
+        });
+      });
+      if (lines.length) assistantMsg("note", "Шаги агента:\n" + lines.join("\n"));
+    }
     await applyAssistantUI(data);
     if (data.source === "local" && !data.hint) {
       assistantMsg("note", "Отвечаю по встроенной инструкции: ключ ИИ не задан (настройки → ИИ-помощник).");
@@ -2660,7 +2670,8 @@ function closeAssistant() {
 async function openSettings() {
   let conf = { encoder: "auto", download_dir: "", clips_dir: "", ask_folder: true,
                hw_available: null, power: 50, cpu_limit: 100, gpu_preference: "auto",
-               ai_provider: "deepseek", ai_model: "", ai_key_set: false, ai: null };
+               ai_provider: "deepseek", ai_model: "", ai_key_set: false, ai: null,
+               agent_mode: false };
   try { conf = await api("/api/settings"); } catch (e) { console.error(e); }
   const modes = [["auto", "Авто"], ["gpu", "Видеокарта"], ["cpu", "Процессор"]];
   $("#modal").innerHTML = `
@@ -2726,6 +2737,11 @@ async function openSettings() {
             ${conf.ai && conf.ai.key_url ? `<a href="${esc(conf.ai.key_url)}" target="_blank" rel="noopener">Получить ключ</a>. ` : ""}
             Запрос уходит на сервер провайдера только по кнопке «Совет ИИ».
           </div>
+          <div class="set-row">
+            <button class="btn-ghost" type="button" id="setLocalDetect">Найти локальный сервер</button>
+            <span class="set-hint" id="setLocalInfo"></span>
+          </div>
+          <label class="toggle agent-toggle"><input type="checkbox" id="setAgentMode" ${conf.agent_mode ? "checked" : ""}/><span class="track"></span><span><b>Агент-режим</b> — выполняет задание по шагам, пока не доведёт до результата</span></label>
         </div>
         <div class="form-card set-section paths-section">
           <h4>Папки сохранения</h4>
@@ -2810,6 +2826,34 @@ async function openSettings() {
     loadAiModels($("#setAiModel")?.value || "", true);
   });
 
+  let agentMode = Boolean(conf.agent_mode);
+  const agentToggle = $("#setAgentMode");
+  if (agentToggle) agentToggle.addEventListener("change", () => { agentMode = agentToggle.checked; });
+
+  $("#setLocalDetect")?.addEventListener("click", async (ev) => {
+    ev.preventDefault();
+    const info = $("#setLocalInfo");
+    if (info) info.textContent = "Ищу Ollama или LM Studio…";
+    try {
+      const found = await api("/api/ai/local");
+      if (!info) return;
+      if (found.available) {
+        info.textContent = `Найдено: ${found.models.slice(0, 4).join(", ")}`;
+        aiProvider = "local";
+        window.__aiProvider = "local";
+        $$("#setAiProvider button").forEach((x) => x.classList.toggle("active", x.dataset.val === "local"));
+        const select = $("#setAiModel");
+        if (select) {
+          select.innerHTML = found.models.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join("");
+        }
+      } else {
+        info.textContent = "Локальный сервер не отвечает: запустите Ollama (11434) или LM Studio (1234).";
+      }
+    } catch (e) {
+      if (info) info.textContent = "Не удалось проверить локальный сервер.";
+    }
+  });
+
   let gpuPreference = conf.gpu_preference || "auto";
   $$("#setGpuPref button").forEach((b) => b.addEventListener("click", () => {
     gpuPreference = b.dataset.val;
@@ -2850,6 +2894,7 @@ async function openSettings() {
         gpu_preference: gpuPreference,
         ai_provider: aiProvider,
         ai_model: $("#setAiModel") ? $("#setAiModel").value : "",
+        agent_mode: agentMode,
       };
       // пустое поле = «не менять ключ», иначе сохранение стирало бы его
       const aiKey = ($("#setAiKey")?.value || "").trim();

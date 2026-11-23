@@ -14,8 +14,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import (ai, assistant, cpu_limit, custom_fonts, db, gpu_pref, jobs,
-               pipeline, render, resources, settings as app_settings,
+from . import (agent, ai, assistant, cpu_limit, custom_fonts, db, gpu_pref,
+               jobs, pipeline, render, resources, settings as app_settings,
                system_stats, transcribe, utils)
 from ._version import __version__
 from .config import ASSETS_DIR, DATA_DIR, PROJECTS_DIR, WEB_DIR, ffmpeg
@@ -60,6 +60,7 @@ class SettingsIn(BaseModel):
     ai_base: Optional[str] = None
     ai_model: Optional[str] = None
     ai_key: Optional[str] = None
+    agent_mode: Optional[bool] = None
 
 
 class UpdateSettingsIn(BaseModel):
@@ -433,9 +434,24 @@ def assistant_start(project_id: Optional[str] = None) -> Dict[str, Any]:
 
 @app.post("/api/assistant")
 def assistant_ask(body: AssistantIn) -> Dict[str, Any]:
-    """Вопрос помощнику: с ключом отвечает модель, без ключа — встроенная база."""
+    """Помощник или агент: в агент-режиме задание выполняется по шагам."""
     context = _assistant_context(body.project_id)
+    if bool(app_settings.get().get("agent_mode")):
+        return agent.run(body.message, context, body.history)
     return assistant.ask(body.message, context, body.history)
+
+
+@app.post("/api/agent")
+def agent_run(body: AssistantIn) -> Dict[str, Any]:
+    """Явный запуск агента: несколько шагов до результата."""
+    context = _assistant_context(body.project_id)
+    return agent.run(body.message, context, body.history)
+
+
+@app.get("/api/ai/local")
+def ai_local(base: Optional[str] = None) -> Dict[str, Any]:
+    """Проверяет, есть ли локальный OpenAI-совместимый сервер (Ollama, LM Studio)."""
+    return ai.local_server(base)
 
 
 @app.get("/api/ai/models")

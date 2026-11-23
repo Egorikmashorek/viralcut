@@ -21,9 +21,20 @@ from . import db, jobs, pipeline, resources
 
 # Что снимаем с модели: строгая схема, лишнее отбрасываем.
 ACTIONS_SPEC = """Доступные действия (только из этого списка):
-{"type":"set_settings","power":0-100,"cpu_limit":25-100,"gpu_preference":"auto|integrated|discrete"}
+{"type":"set_settings","power":0-100,"cpu_limit":25-100,"gpu_preference":"auto|integrated|discrete","encoder":"auto|gpu|cpu"}
 {"type":"set_ai_mode","enabled":true|false,"prompt":"текст задания"}
-{"type":"start_cut","url":"ссылка","project_id":"id","count":1-50,"min_dur":3-120,"max_dur":5-180,"aspect":"9:16|1:1|16:9|4:5","ai_mode":true|false,"ai_prompt":"текст"}
+{"type":"start_cut","url":"ссылка","project_id":"id","count":1-50,"min_dur":3-120,"max_dur":5-180,
+ "aspect":"9:16|1:1|16:9|4:5","mode":"auto|blur|crop","subtitles":true|false,
+ "accent":"yellow|pink|cyan|lime|green|red|orange|lavender",
+ "sub_size":40-240,"sub_font":"montserrat|lato|play|ptsans|oswald|unbounded|caveat|golos|onest|marmelad|stalinist|underdog",
+ "sub_position":"bottom|middle|top","cut_pauses":true|false,"language":"auto|ru|en",
+ "ai_mode":true|false,"ai_prompt":"текст"}
+{"type":"rerender_clip","clip_id":"id","mode":"auto|blur|crop","aspect":"9:16|1:1|16:9|4:5",
+ "accent":"...","sub_size":40-240,"sub_font":"...","sub_position":"...","cut_pauses":true|false}
+{"type":"update_project","project_id":"id","aspect":"...","mode":"...","subtitles":true|false,
+ "accent":"...","sub_size":40-240,"sub_font":"...","cut_pauses":true|false}
+{"type":"list_projects"}
+{"type":"get_project","project_id":"id"}
 {"type":"advice","project_id":"id"}
 {"type":"open_settings"}
 {"type":"open_project","project_id":"id"}
@@ -33,7 +44,14 @@ ACTIONS_SPEC = """Доступные действия (только из это�
 {"actions":[{"type":"...", ...}]}
 ```"""
 
-_ALLOWED = {"set_settings", "set_ai_mode", "start_cut", "advice", "open_settings", "open_project"}
+_ALLOWED = {"set_settings", "set_ai_mode", "start_cut", "rerender_clip", "update_project",
+            "list_projects", "get_project", "advice", "open_settings", "open_project"}
+_ACCENTS = {"yellow", "pink", "cyan", "lime", "green", "red", "orange", "lavender"}
+_FONTS = {"montserrat", "lato", "play", "ptsans", "oswald", "unbounded", "caveat",
+          "golos", "onest", "marmelad", "stalinist", "underdog", "marckscript"}
+_ASPECTS = {"9:16", "1:1", "16:9", "4:5"}
+_MODES = {"auto", "blur", "crop"}
+_POSITIONS = {"bottom", "middle", "top"}
 _UI_ONLY = {"open_settings", "open_project", "set_ai_mode"}
 
 # Локальный разбор без модели: цифры и числительные в разных падежах.
@@ -62,6 +80,30 @@ def _number(text: str) -> Optional[int]:
     return None
 
 
+def _style_fields(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Общие поля оформления: и для нарезки, и для пересборки, и для проекта."""
+    out: Dict[str, Any] = {}
+    if str(item.get("aspect") or "") in _ASPECTS:
+        out["aspect"] = item["aspect"]
+    if str(item.get("mode") or "") in _MODES:
+        out["mode"] = item["mode"]
+    if str(item.get("accent") or "") in _ACCENTS:
+        out["accent"] = item["accent"]
+    if str(item.get("sub_font") or "") in _FONTS:
+        out["sub_font"] = item["sub_font"]
+    if str(item.get("sub_position") or "") in _POSITIONS:
+        out["sub_position"] = item["sub_position"]
+    if isinstance(item.get("sub_size"), (int, float)):
+        out["sub_size"] = max(40, min(240, int(item["sub_size"])))
+    if "subtitles" in item:
+        out["subtitles"] = bool(item["subtitles"])
+    if "cut_pauses" in item:
+        out["cut_pauses"] = bool(item["cut_pauses"])
+    if str(item.get("language") or "") in ("auto", "ru", "en"):
+        out["language"] = item["language"]
+    return out
+
+
 def validate(raw: Any) -> List[Dict[str, Any]]:
     """Оставляет только известные команды с допустимыми значениями."""
     if not isinstance(raw, list):
@@ -82,6 +124,8 @@ def validate(raw: Any) -> List[Dict[str, Any]]:
             pref = str(item.get("gpu_preference") or "")
             if pref in ("auto", "integrated", "discrete"):
                 action["gpu_preference"] = pref
+            if str(item.get("encoder") or "") in ("auto", "gpu", "cpu"):
+                action["encoder"] = item["encoder"]
             if len(action) > 1:
                 result.append(action)
         elif kind == "set_ai_mode":
@@ -96,11 +140,31 @@ def validate(raw: Any) -> List[Dict[str, Any]]:
             for key, low, high in (("count", 1, 50), ("min_dur", 3, 120), ("max_dur", 5, 180)):
                 if isinstance(item.get(key), (int, float)):
                     action[key] = max(low, min(high, int(item[key])))
-            if str(item.get("aspect") or "") in ("9:16", "1:1", "16:9", "4:5"):
-                action["aspect"] = item["aspect"]
+            action.update(_style_fields(item))
             if "ai_mode" in item:
                 action["ai_mode"] = bool(item["ai_mode"])
-            if action.get("url") or action.get("project_id"):
+            # без ссылки и id действие применяется к открытому проекту —
+            # решение принимает execute(), а не валидатор
+            result.append(action)
+        elif kind == "rerender_clip":
+            cid = str(item.get("clip_id") or "").strip()
+            if cid:
+                action["clip_id"] = cid
+                action.update(_style_fields(item))
+                result.append(action)
+        elif kind == "update_project":
+            pid = str(item.get("project_id") or "").strip()
+            if pid:
+                action["project_id"] = pid
+                action.update(_style_fields(item))
+                if len(action) > 2:
+                    result.append(action)
+        elif kind == "list_projects":
+            result.append(action)
+        elif kind == "get_project":
+            pid = str(item.get("project_id") or "").strip()
+            if pid:
+                action["project_id"] = pid
                 result.append(action)
         elif kind == "advice":
             pid = str(item.get("project_id") or "").strip()
@@ -161,15 +225,13 @@ def parse_local(question: str) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     settings_action: Dict[str, Any] = {"type": "set_settings"}
 
-    if re.search(r"(лимит|потолок|не более|огранич).*(процессор|cpu|ядер)", text) or \
-            re.search(r"(процессор|cpu).*(лимит|потолок|не более)", text):
-        value = _number(text)
-        if value:
-            settings_action["cpu_limit"] = max(25, min(100, value))
-    if "мощност" in text:
-        value = _number(text)
-        if value:
-            settings_action["power"] = max(0, min(100, value))
+    number = _number(text)
+    mentions_cpu = bool(re.search(r"(процессор|cpu|ядер|процент|%)", text))
+    mentions_limit = bool(re.search(r"(лимит|потолок|не более|огранич)", text))
+    if mentions_limit and number and (mentions_cpu or "процент" in text):
+        settings_action["cpu_limit"] = max(25, min(100, number))
+    if "мощност" in text and number:
+        settings_action["power"] = max(0, min(100, number))
     if "дискретн" in text:
         settings_action["gpu_preference"] = "discrete"
     elif "встроенн" in text and "карт" in text:
@@ -241,6 +303,57 @@ def execute(action: Dict[str, Any],
     if kind == "start_cut":
         return _start_cut(action, context or {})
 
+    if kind == "rerender_clip":
+        from . import jobs as jobs_module
+
+        clip = db.get_clip(action.get("clip_id") or "")
+        if not clip:
+            return {"ok": False, "type": kind, "message": "Клип не найден."}
+        patch = {key: action[key] for key in
+                 ("mode", "aspect", "accent", "sub_size", "sub_font", "sub_position",
+                  "cut_pauses", "subtitles") if key in action}
+        if not patch:
+            return {"ok": False, "type": kind, "message": "Не указано, что поменять в клипе."}
+        started = jobs_module.submit_rerender(clip["id"], patch)
+        if not started:
+            return {"ok": False, "type": kind,
+                    "message": "Клип уже пересобирается — подождите."}
+        return {"ok": True, "type": kind, "clip_id": clip["id"],
+                "message": "Пересобираю клип: " + ", ".join(f"{k}={v}" for k, v in patch.items())}
+
+    if kind == "update_project":
+        from . import pipeline as pipeline_module
+
+        project = db.get_project(action.get("project_id") or "")
+        if not project:
+            return {"ok": False, "type": kind, "message": "Проект не найден."}
+        patch = {key: action[key] for key in
+                 ("mode", "aspect", "accent", "sub_size", "sub_font", "sub_position",
+                  "subtitles", "cut_pauses") if key in action}
+        if not patch:
+            return {"ok": False, "type": kind, "message": "Не указано, что поменять."}
+        merged = pipeline_module.normalize_options({**(project.get("options") or {}), **patch})
+        db.update_project(project["id"], options=merged)
+        return {"ok": True, "type": kind, "project_id": project["id"],
+                "message": "Настройки проекта обновлены: " + ", ".join(
+                    f"{k}={v}" for k, v in patch.items())}
+
+    if kind == "list_projects":
+        items = db.list_projects(limit=10)
+        lines = [f"{p['id']} · {p.get('status')} · {(p.get('title') or '')[:40]}"
+                 for p in items]
+        return {"ok": True, "type": kind, "projects": items,
+                "message": "Проекты: " + "; ".join(lines) if lines else "Проектов пока нет."}
+
+    if kind == "get_project":
+        project = db.get_project(action.get("project_id") or "")
+        if not project:
+            return {"ok": False, "type": kind, "message": "Проект не найден."}
+        clips = db.list_clips(project["id"])
+        return {"ok": True, "type": kind, "project": project, "clips": clips,
+                "message": (f"Статус {project.get('status')}, клипов {len(clips)}, "
+                            f"язык {project.get('language') or '—'}")}
+
     if kind == "advice":
         from . import ai as ai_module
 
@@ -276,7 +389,8 @@ def execute(action: Dict[str, Any],
 def _start_cut(action: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
     """Запускает нарезку: по ссылке или по уже загруженному проекту."""
     options: Dict[str, Any] = {}
-    for key in ("count", "min_dur", "max_dur", "aspect"):
+    for key in ("count", "min_dur", "max_dur", "aspect", "mode", "subtitles",
+                "accent", "sub_size", "sub_font", "sub_position", "cut_pauses", "language"):
         if key in action:
             options[key] = action[key]
     if action.get("ai_mode"):

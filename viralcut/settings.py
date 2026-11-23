@@ -9,7 +9,8 @@
   * cpu_limit — 25..100, жёсткий потолок загрузки процессора;
   * gpu_preference — auto | integrated | discrete: на какой видеокарте считать;
   * ai_provider / ai_base / ai_model — ИИ-помощник (OpenAI-совместимый API);
-  * ai_key — ключ доступа, хранится локально с правами 0600.
+  * ai_key — ключ доступа, хранится локально с правами 0600;
+  * agent_mode — агент работает по шагам и сам доводит задание до конца.
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ DEFAULTS: Dict[str, Any] = {
     "ai_base": "",              # пусто — берём адрес провайдера по умолчанию
     "ai_model": "",             # пусто — модель провайдера по умолчанию
     "ai_key": "",               # ключ: на диск с правами 0600, в API не отдаём
+    "agent_mode": False,        # агент: несколько шагов до результата
 }
 _LOCK = threading.Lock()
 
@@ -111,7 +113,8 @@ def update(patch: Dict[str, Any]) -> Dict[str, Any]:
                 pass
         if "gpu_preference" in patch and patch["gpu_preference"] in ("auto", "integrated", "discrete"):
             data["gpu_preference"] = patch["gpu_preference"]
-        if "ai_provider" in patch and patch["ai_provider"] in ("deepseek", "polza", "openai", "custom"):
+        if "ai_provider" in patch and patch["ai_provider"] in (
+                "deepseek", "polza", "openai", "local", "custom"):
             data["ai_provider"] = patch["ai_provider"]
             # при смене провайдера сбрасываем адрес и модель на его значения
             data["ai_base"] = ""
@@ -122,5 +125,7 @@ def update(patch: Dict[str, Any]) -> Dict[str, Any]:
             data["ai_model"] = str(patch["ai_model"] or "").strip()[:120]
         if "ai_key" in patch:
             data["ai_key"] = str(patch["ai_key"] or "").strip()[:400]
+        if "agent_mode" in patch:
+            data["agent_mode"] = bool(patch["agent_mode"])
         _save(data)
     return get()

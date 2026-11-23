@@ -2227,3 +2227,6 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .assistant-form textarea:focus { outline: none; border-color: rgba(139, 92, 246, 0.65); }
 .assistant-form .btn-primary { padding: 9px 13px; }
+
+.agent-toggle { margin-top: 8px; }
+.assistant-msg.note p { white-space: pre-wrap; }

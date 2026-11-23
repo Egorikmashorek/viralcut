@@ -2320,19 +2320,28 @@ function aiProviderHint(conf) {
   return `${note}Запросы уходят с вашим ключом напрямую провайдеру. Без ключа кнопка «Совет ИИ» не работает.`;
 }
 
-async function loadAiModels(selected) {
+async function loadAiModels(selected, force) {
   const select = $("#setAiModel");
   if (!select) return;
   const provider = (window.__aiProvider || "deepseek");
   const fallback = AI_FALLBACK_MODELS[provider] || [];
+  const hint = $("#setAiModelHint");
+  if (hint) hint.textContent = "Загружаю список моделей…";
   try {
-    const data = await api(`/api/ai/models?provider=${encodeURIComponent(provider)}`);
-    const models = (data.models || []).slice(0, 400);
+    const query = `?provider=${encodeURIComponent(provider)}${force ? "&force=true" : ""}`;
+    const data = await api(`/api/ai/models${query}`);
+    const models = (data.models || []).slice(0, 500);
     if (!models.length) throw new Error("пусто");
     select.innerHTML = models.map((m) =>
       `<option value="${esc(m.id)}" ${m.id === selected ? "selected" : ""}>${esc(m.name || m.id)}</option>`).join("");
     if (selected && !models.some((m) => m.id === selected)) {
       select.insertAdjacentHTML("afterbegin", `<option value="${esc(selected)}" selected>${esc(selected)}</option>`);
+    }
+    if (hint) {
+      const current = models.find((m) => m.id === select.value);
+      const total = `Моделей в каталоге: ${models.length}.`;
+      const desc = current && current.description ? ` ${current.description}` : "";
+      hint.textContent = (data.warning ? `${data.warning} ` : "") + total + desc;
     }
   } catch (err) {
     select.innerHTML = (fallback.length ? fallback : [selected].filter(Boolean))
@@ -2477,9 +2486,13 @@ async function openSettings() {
           </div>
           <div class="set-hint" id="setAiProviderHint">${aiProviderHint(conf)}</div>
           <label class="set-label" for="setAiModel">Модель</label>
-          <select id="setAiModel" class="set-select">
-            <option value="${esc(conf.ai_model || "")}">${esc(conf.ai_model || "Загрузка…")}</option>
-          </select>
+          <div class="set-row">
+            <select id="setAiModel" class="set-select">
+              <option value="${esc(conf.ai_model || "")}">${esc(conf.ai_model || "Загрузка…")}</option>
+            </select>
+            <button class="btn-ghost" type="button" id="setAiRefresh" title="Обновить список моделей">Обновить</button>
+          </div>
+          <div class="set-hint" id="setAiModelHint"></div>
           <label class="set-label" for="setAiKey">API-ключ</label>
           <input type="password" id="setAiKey" class="set-input" autocomplete="off" spellcheck="false"
                  placeholder="${conf.ai_key_set ? "ключ сохранён — оставьте пустым, чтобы не менять" : "вставьте ключ"}" />
@@ -2562,6 +2575,15 @@ async function openSettings() {
     loadAiModels("");
   }));
   loadAiModels(conf.ai_model || "");
+  $("#setAiModel")?.addEventListener("change", () => {
+    const hint = $("#setAiModelHint");
+    const option = $("#setAiModel")?.selectedOptions?.[0];
+    if (hint && option) hint.textContent = `Выбрано: ${option.textContent}`;
+  });
+  $("#setAiRefresh")?.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    loadAiModels($("#setAiModel")?.value || "", true);
+  });
 
   let gpuPreference = conf.gpu_preference || "auto";
   $$("#setGpuPref button").forEach((b) => b.addEventListener("click", () => {

@@ -173,13 +173,12 @@ def models(force: bool = False, provider: Optional[str] = None) -> Dict[str, Any
             data = json.loads(response.read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
-            if not api_key:
-                known = FALLBACK_MODELS.get(conf["provider"]) or [conf["model"]]
-                return {"models": [{"id": name, "name": name, "owner": "",
-                                    "description": ""} for name in known if name],
-                        "base": conf["base"], "fallback": True}
-            raise AIError("Сервер не принял ключ при загрузке моделей. "
-                          "Проверьте ключ в настройках.") from exc
+            known = FALLBACK_MODELS.get(conf["provider"]) or [conf["model"]]
+            return {"models": [{"id": name, "name": name, "owner": "",
+                                "description": ""} for name in known if name],
+                    "base": conf["base"], "fallback": True,
+                    "warning": ("Ключ не принят сервером — показываю известные "
+                                "модели. Проверьте ключ." if api_key else "")}
         raise AIError(f"Каталог моделей недоступен (ошибка {exc.code}).") from exc
     except urllib.error.URLError as exc:
         raise AIError("Не удалось связаться с сервером, чтобы получить список моделей.") from exc

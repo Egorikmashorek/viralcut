@@ -2106,3 +2106,7 @@ input[type="range"]::-webkit-slider-thumb {
 .advice-loading { display: flex; align-items: center; gap: 9px; color: var(--muted-2); }
 .advice-hint { margin-top: 4px; }
 .advice-panel { max-width: 640px; }
+
+.ai-section .set-row { display: flex; gap: 8px; align-items: center; }
+.ai-section .set-row .set-select { flex: 1; }
+.ai-section .set-row .btn-ghost { flex: none; white-space: nowrap; }

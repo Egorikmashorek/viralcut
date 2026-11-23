@@ -38,15 +38,18 @@
 
 | Платформа | Файл | Размер | Что внутри |
 |---|---|---|---|
-| **macOS 12+** (Apple Silicon) | [`ViralCut-1.5.10.dmg`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.10.dmg) | 637 МБ | Модель Whisper, ffmpeg, шрифты, PO-провайдер. Перетащить в «Программы» |
-| **macOS, ZIP** | [`ViralCut-1.5.10-macOS-arm64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.10-macOS-arm64.zip) | 618 МБ | То же в архиве |
-| **Windows 10/11 x64** | [`ViralCut-1.5.10-windows-x64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.10-windows-x64.zip) | 642 МБ | `ViralCut.exe`, модель Whisper, ffmpeg, шрифты |
-| **Windows, без установки** | [`ViralCut-1.5.10-windows-x64-portable.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.10-windows-x64-portable.zip) | 690 МБ | Python и зависимости внутри: распаковать и запустить `ViralCut.bat` |
+| **macOS 12+** (Apple Silicon) | [`ViralCut-1.5.13.dmg`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.13.dmg) | 637 МБ | Модель Whisper, ffmpeg, шрифты, PO-провайдер |
+| **macOS 12+** (Intel) | [`ViralCut-1.5.13-intel.dmg`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.13-intel.dmg) | 691 МБ | То же для Intel Mac, считает на дискретной карте |
+| **Windows 10/11 x64** | [`ViralCut-1.5.13-windows-x64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.13-windows-x64.zip) | 642 МБ | `ViralCut.exe`, модель, ffmpeg, шрифты |
+| **Windows, без установки** | [`ViralCut-1.5.13-windows-x64-portable.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.13-windows-x64-portable.zip) | 690 МБ | Python и зависимости внутри: распаковать и запустить `ViralCut.bat` |
 
-Актуальный релиз — **[1.5.10](https://github.com/vanwild11/viralcut/releases/latest)**:
-в нём исправлен запуск на Windows (приложение больше не закрывается молча) и
-субтитры, которые выходили за края кадра. Контрольные суммы — в
-`SHA256SUMS-1.5.10.txt` рядом с файлами релиза.
+ZIP-варианты для macOS: [`arm64`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.13-macOS-arm64.zip) и
+[`x86_64`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.13-macOS-x86_64.zip).
+
+Актуальный релиз — **[1.5.13](https://github.com/vanwild11/viralcut/releases/latest)**:
+лимит загрузки процессора, выбор встроенной или дискретной видеокарты, субтитры
+на языке ролика и сборка для Intel Mac. Контрольные суммы — в
+`SHA256SUMS-1.5.13.txt` рядом с файлами релиза.
 
 ## Почему ViralCut
 

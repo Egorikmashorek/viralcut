@@ -14,8 +14,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import (custom_fonts, db, jobs, pipeline, render, resources,
-               settings as app_settings, system_stats, transcribe, utils)
+from . import (cpu_limit, custom_fonts, db, gpu_pref, jobs, pipeline, render,
+               resources, settings as app_settings, system_stats, transcribe, utils)
 from ._version import __version__
 from .config import ASSETS_DIR, DATA_DIR, PROJECTS_DIR, WEB_DIR, ffmpeg
 
@@ -42,6 +42,8 @@ class SettingsIn(BaseModel):
     clips_dir: Optional[str] = None
     ask_folder: Optional[bool] = None
     power: Optional[int] = Field(None, ge=0, le=100)
+    cpu_limit: Optional[int] = Field(None, ge=25, le=100)
+    gpu_preference: Optional[str] = None
 
 
 class UpdateSettingsIn(BaseModel):
@@ -105,6 +107,11 @@ async def _lifespan(_app: FastAPI):
     db.init_db()
     db.reset_stale_jobs()
     custom_fonts.sync()
+    # жёсткий потолок загрузки процессора: включается один раз на процесс
+    try:
+        cpu_limit.apply()
+    except Exception:  # noqa: BLE001 — лимит не должен мешать запуску
+        traceback.print_exc()
     # пробный кадр GPU — в фоне: /api/health не должен ждать энкодер
     import threading as _threading
 
@@ -209,6 +216,7 @@ def health() -> Dict[str, Any]:
         # пробным кадром GPU (на Windows без NVENC это секунды ожидания)
         "hw": render.hw_cached(),
         "limits": resources.summary(),
+        "cpu_cap": cpu_limit.status(),
         "projects": db.count_projects(),
     }
 
@@ -322,6 +330,7 @@ def settings_get() -> Dict[str, Any]:
     data = app_settings.get()
     data["hw_available"] = render.hw_encoder()
     data["limits"] = resources.summary()
+    data["cpu_cap"] = cpu_limit.status()
     try:
         from . import system_stats
 
@@ -340,7 +349,15 @@ def settings_set(body: SettingsIn) -> Dict[str, Any]:
     # новый уровень мощности применяется сразу: шлагбаум рендеров читает его
     # из настроек на каждой задаче, а кэш сбрасываем, чтобы не ждать секунду
     resources.invalidate()
+    # новый потолок CPU и выбор видеокарты применяем сразу
+    try:
+        cpu_limit.apply()
+        gpu_pref.apply()
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+    render.reset_hw_encoder()
     data["limits"] = resources.summary()
+    data["cpu_cap"] = cpu_limit.status()
     # выбор энкодера применяем сразу: кэш пробного кадра сбрасываем
     render.reset_hw_encoder()
     data["hw_available"] = render.hw_encoder()

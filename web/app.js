@@ -2269,6 +2269,26 @@ function powerLabel(value) {
   return "Максимум";
 }
 
+function cpuLimitLabel(value) {
+  const v = Math.max(25, Math.min(100, Number(value) || 100));
+  return v >= 100 ? "Без лимита" : `Не более ${v}%`;
+}
+
+function cpuLimitHint(value, cap) {
+  const v = Math.max(25, Math.min(100, Number(value) || 100));
+  if (v >= 100) return "Процессор не ограничен: обработка идёт на полной скорости.";
+  const mechanism = cap && cap.mechanism === "job_object"
+    ? "Windows сам держит процесс ниже потолка."
+    : "Рендеры приостанавливаются, чтобы не занимать машину целиком.";
+  return `Не более ${v}% процессора. ${mechanism}`;
+}
+
+function gpuPreferenceHint(preference) {
+  if (preference === "integrated") return "Считать на встроенной видеокарте: тише и холоднее, кодирование медленнее.";
+  if (preference === "discrete") return "Считать на дискретной карте: быстрее кодирование. На Windows предпочтение записывается в систему.";
+  return "Система решает сама: обычно встроенная карта, пока не нужна дискретная.";
+}
+
 function gpuListHint(gpus) {
   if (!gpus || !Array.isArray(gpus.list) || !gpus.list.length) return "";
   const names = gpus.list.map((name) => esc(name)).join(", ");
@@ -2297,7 +2317,8 @@ function powerHint(limits) {
 }
 
 async function openSettings() {
-  let conf = { encoder: "auto", download_dir: "", clips_dir: "", ask_folder: true, hw_available: null };
+  let conf = { encoder: "auto", download_dir: "", clips_dir: "", ask_folder: true,
+               hw_available: null, power: 50, cpu_limit: 100, gpu_preference: "auto" };
   try { conf = await api("/api/settings"); } catch (e) { console.error(e); }
   const modes = [["auto", "Авто"], ["gpu", "Видеокарта"], ["cpu", "Процессор"]];
   $("#modal").innerHTML = `
@@ -2317,6 +2338,12 @@ async function openSettings() {
             Видеокарта ускоряет кодирование, когда доступен аппаратный кодировщик${conf.hw_available ? ` (${esc(conf.hw_available)})` : ""}.
             ${gpuListHint(conf.gpus)}
           </div>
+          <label class="set-label" for="setGpuPref">На какой видеокарте считать</label>
+          <div class="set-seg" id="setGpuPref">
+            ${[["auto", "Авто"], ["integrated", "Встроенная"], ["discrete", "Дискретная"]]
+              .map(([k, label]) => `<button data-val="${k}" class="${(conf.gpu_preference || "auto") === k ? "active" : ""}">${label}</button>`).join("")}
+          </div>
+          <div class="set-hint" id="setGpuHint">${gpuPreferenceHint(conf.gpu_preference || "auto")}</div>
         </div>
         <div class="form-card set-section power-section">
           <h4>Мощность</h4>
@@ -2327,6 +2354,13 @@ async function openSettings() {
           </div>
           <div class="power-scale"><span>Экономно</span><span>Баланс</span><span>Максимум</span></div>
           <div class="set-hint" id="setPowerHint">${powerHint(conf.limits)}</div>
+          <div class="power-row cpu-row">
+            <input type="range" id="setCpuLimit" min="25" max="100" step="5"
+                   value="${Number(conf.cpu_limit ?? 100)}" aria-label="Потолок загрузки процессора" />
+            <output id="setCpuLimitValue" class="power-value">${cpuLimitLabel(conf.cpu_limit ?? 100)}</output>
+          </div>
+          <div class="power-scale"><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div>
+          <div class="set-hint" id="setCpuLimitHint">${cpuLimitHint(conf.cpu_limit ?? 100, conf.cpu_cap)}</div>
         </div>
         <div class="form-card set-section paths-section">
           <h4>Папки сохранения</h4>
@@ -2375,6 +2409,25 @@ async function openSettings() {
       diagBtn.textContent = "Разобрать журнал";
     }
   });
+  const cpuInput = $("#setCpuLimit");
+  if (cpuInput) {
+    const syncCpu = () => {
+      const value = Number(cpuInput.value);
+      const label = $("#setCpuLimitValue");
+      if (label) label.textContent = cpuLimitLabel(value);
+      const hint = $("#setCpuLimitHint");
+      if (hint) hint.textContent = cpuLimitHint(value, conf.cpu_cap);
+    };
+    cpuInput.addEventListener("input", syncCpu);
+  }
+  let gpuPreference = conf.gpu_preference || "auto";
+  $$("#setGpuPref button").forEach((b) => b.addEventListener("click", () => {
+    gpuPreference = b.dataset.val;
+    $$("#setGpuPref button").forEach((x) => x.classList.toggle("active", x === b));
+    const hint = $("#setGpuHint");
+    if (hint) hint.textContent = gpuPreferenceHint(gpuPreference);
+  }));
+
   const powerInput = $("#setPower");
   if (powerInput) {
     const syncPower = () => {
@@ -2405,6 +2458,8 @@ async function openSettings() {
           clips_dir: $("#setClipsDir").value.trim(),
           ask_folder: $("#setAskFolder").checked,
           power: Number($("#setPower").value),
+          cpu_limit: Number($("#setCpuLimit").value),
+          gpu_preference: gpuPreference,
         }),
       });
       closeModal();

@@ -81,6 +81,22 @@ def _level() -> float:
     return power() / 100.0
 
 
+def cpu_share() -> float:
+    """Доля машины, разрешённая жёстким лимитом процессора (0.25…1.0)."""
+    env = os.environ.get("VIRALCUT_CPU_LIMIT")
+    if env is not None:
+        try:
+            return max(0.25, min(1.0, int(env) / 100.0))
+        except ValueError:
+            return 1.0
+    try:
+        from . import settings
+
+        return max(0.25, min(1.0, int(settings.get().get("cpu_limit", 100)) / 100.0))
+    except Exception:  # noqa: BLE001
+        return 1.0
+
+
 def max_render_workers() -> int:
     """Сколько рендеров машина осилит на максимуме (не больше 4)."""
     return max(1, min(4, cpu_count() // 2))
@@ -101,7 +117,8 @@ def render_workers() -> int:
 def cpu_budget() -> int:
     """Сколько ядер суммарно разрешено занять ffmpeg-рендерам."""
     cpu = cpu_count()
-    return max(1, int(round(cpu * (0.15 + 0.85 * _level()))))
+    budget = cpu * (0.15 + 0.85 * _level()) * cpu_share()
+    return max(1, int(round(budget)))
 
 
 def ffmpeg_threads() -> int:
@@ -127,7 +144,8 @@ def whisper_threads() -> int:
     if env is not None:
         return _env_int("VIRALCUT_WHISPER_THREADS", 1, 1, 32)
     cpu = cpu_count()
-    return max(1, min(32, int(round(cpu * (0.2 + 0.6 * _level())))))
+    threads = cpu * (0.2 + 0.6 * _level()) * cpu_share()
+    return max(1, min(32, int(round(threads))))
 
 
 def low_priority() -> bool:
@@ -170,9 +188,12 @@ def subprocess_kwargs() -> Dict[str, Any]:
 
 def summary() -> Dict[str, Any]:
     """Текущие лимиты — их показывает интерфейс и /api/health."""
+    from . import cpu_limit as _cpu_limit
+
     return {
         "cpu": cpu_count(),
         "power": power(),
+        "cpu_limit": _cpu_limit.limit(),
         "render_workers": render_workers(),
         "ffmpeg_threads": ffmpeg_threads(),
         "whisper_threads": whisper_threads(),

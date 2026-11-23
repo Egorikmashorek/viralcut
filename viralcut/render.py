@@ -213,6 +213,13 @@ def _find_hw_encoder(excluded: Tuple[str, ...] = ()) -> Optional[str]:
     preferred = {"darwin": ["h264_videotoolbox"],
                  "win32": ["h264_nvenc", "h264_amf", "h264_qsv"],
                  "linux": ["h264_nvenc", "h264_vaapi", "h264_qsv"]}.get(sys.platform, [])
+    # Выбор пользователя: дискретная карта (NVENC/AMF) или встроенная (Quick Sync)
+    try:
+        from . import gpu_pref
+
+        preferred = gpu_pref.encoder_order(preferred)
+    except Exception:  # noqa: BLE001 — предпочтение не критично
+        pass
     if "encoders" not in _HW_CACHE:
         try:
             proc = run([ffmpeg(), "-hide_banner", "-encoders"])

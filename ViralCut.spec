@@ -155,5 +155,9 @@ if IS_MAC:
             "NSRequiresAquaSystemAppearance": False,
             "LSApplicationCategoryType": "public.app-category.video",
             "NSHumanReadableCopyright": "ViralCut",
+            # Intel-сборка по умолчанию считается на дискретной карте:
+            # без этого macOS выбирает встроенную (и меняет её на ходу).
+            **({"NSSupportsAutomaticGraphicsSwitching": False}
+               if os.environ.get("VIRALCUT_FORCE_DISCRETE_GPU") == "1" else {}),
         },
     )

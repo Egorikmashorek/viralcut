@@ -5,7 +5,9 @@
   * download_dir — куда складывать скачанные исходники;
   * clips_dir — куда сохранять готовые клипы;
   * ask_folder — спрашивать папку при каждом сохранении;
-  * power — 0..100, сколько мощности машины отдавать обработке.
+  * power — 0..100, сколько мощности машины отдавать обработке;
+  * cpu_limit — 25..100, жёсткий потолок загрузки процессора;
+  * gpu_preference — auto | integrated | discrete: на какой видеокарте считать.
 """
 from __future__ import annotations
 
@@ -24,6 +26,8 @@ DEFAULTS: Dict[str, Any] = {
     "clips_dir": "",
     "ask_folder": True,
     "power": 50,                # 0 — экономно, 100 — максимум
+    "cpu_limit": 100,           # 25..100: не занимать больше N% процессора
+    "gpu_preference": "auto",   # auto | integrated | discrete
 }
 _LOCK = threading.Lock()
 
@@ -80,5 +84,12 @@ def update(patch: Dict[str, Any]) -> Dict[str, Any]:
                 data["power"] = max(0, min(100, int(patch["power"])))
             except (TypeError, ValueError):
                 pass
+        if "cpu_limit" in patch:
+            try:
+                data["cpu_limit"] = max(25, min(100, int(patch["cpu_limit"])))
+            except (TypeError, ValueError):
+                pass
+        if "gpu_preference" in patch and patch["gpu_preference"] in ("auto", "integrated", "discrete"):
+            data["gpu_preference"] = patch["gpu_preference"]
         _save(data)
     return get()

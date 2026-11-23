@@ -454,10 +454,22 @@ def _gpu_rank(name: str) -> int:
     return 5
 
 
-def _pick_gpu(names: List[str]) -> tuple[str, bool]:
-    """Имя и признак дискретности: приоритет у отдельной карты."""
+def _gpu_preference() -> str:
+    try:
+        from . import gpu_pref
+
+        return gpu_pref.preference()
+    except Exception:  # noqa: BLE001
+        return "auto"
+
+
+def _pick_gpu(names: List[str], preference: str = "auto") -> tuple[str, bool]:
+    """Имя и признак дискретности: учитываем выбор пользователя."""
     if not names:
         return "", False
+    if preference == "integrated":
+        best = min(names, key=_gpu_rank)
+        return best, False
     best = max(names, key=_gpu_rank)
     return best, _gpu_rank(best) >= 25
 
@@ -584,7 +596,8 @@ def _gpu_windows() -> Dict[str, Any]:
         return dict(_GPU_CACHE["value"])
 
     adapters = _windows_adapters_cached()
-    name, discrete = _pick_gpu(adapters)
+    preference = _gpu_preference()
+    name, discrete = _pick_gpu(adapters, preference)
     if not name:
         # Список адаптеров недоступен (или пуст): берём имя из WinSAT.
         name = _gpu_windows_registry_name()
@@ -594,7 +607,7 @@ def _gpu_windows() -> Dict[str, Any]:
     # Дискретная NVIDIA — сразу nvidia-smi: она отдаёт точное имя и загрузку
     # именно этой карты, а не сумму по всем адаптерам (на ноутбуках PDH
     # показывает встроенную, которая рисует рабочий стол).
-    if discrete and _gpu_vendor(name) == "nvidia":
+    if discrete and preference != "integrated" and _gpu_vendor(name) == "nvidia":
         smi = _gpu_nvidia()
         if smi.get("percent") is not None:
             smi["vendor"] = "nvidia"
@@ -613,6 +626,7 @@ def _gpu_windows() -> Dict[str, Any]:
         result["source"] = "pdh"
         result["discrete"] = discrete
         result["adapters"] = adapters
+        result["preference"] = preference
         _GPU_SOURCE[0] = "pdh"
         _GPU_CACHE["value"] = result
         _GPU_CACHE["ts"] = now
@@ -738,8 +752,9 @@ def adapters() -> Dict[str, Any]:
     if _platform() != "win32":
         return {"list": [], "picked": "", "discrete": ""}
     names = _windows_adapters_cached()
-    picked, is_discrete = _pick_gpu(names)
-    return {"list": names, "picked": picked,
+    preference = _gpu_preference()
+    picked, is_discrete = _pick_gpu(names, preference)
+    return {"list": names, "picked": picked, "preference": preference,
             "discrete": picked if is_discrete else ""}
 
 

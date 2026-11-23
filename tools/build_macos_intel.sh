@@ -42,6 +42,10 @@ if [ -d "$VENDOR_SRC" ]; then
   fi
 fi
 
+# На Intel Mac с двумя картами по умолчанию считаем на дискретной:
+# ключ Info.plist отключает автоматическое переключение (можно выключить
+# переменной VIRALCUT_FORCE_DISCRETE_GPU=0).
+export VIRALCUT_FORCE_DISCRETE_GPU="${VIRALCUT_FORCE_DISCRETE_GPU:-1}"
 export PYINSTALLER_CONFIG_DIR="$PWD/build/pyinstaller-config-intel"
 export PYTHONPYCACHEPREFIX="$PWD/.pycache"
 mkdir -p "$PYINSTALLER_CONFIG_DIR"

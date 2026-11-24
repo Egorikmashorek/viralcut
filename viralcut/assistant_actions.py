@@ -29,8 +29,12 @@ ACTIONS_SPEC = """Доступные действия (только из это�
  "sub_size":40-240,"sub_font":"montserrat|lato|play|ptsans|oswald|unbounded|caveat|golos|onest|marmelad|stalinist|underdog",
  "sub_position":"bottom|middle|top","cut_pauses":true|false,"language":"auto|ru|en",
  "ai_mode":true|false,"ai_prompt":"текст"}
-{"type":"rerender_clip","clip_id":"id","mode":"auto|blur|crop","aspect":"9:16|1:1|16:9|4:5",
- "accent":"...","sub_size":40-240,"sub_font":"...","sub_position":"...","cut_pauses":true|false}
+{"type":"rerender_clip","clip_id":"id или clip_number","clip_number":1-50,"mode":"auto|blur|crop","aspect":"9:16|1:1|16:9|4:5",
+ "accent":"...","sub_size":40-240,"sub_font":"...","sub_position":"...","cut_pauses":true|false,
+ "sub_speed":"calm|normal|fast","text":"полный исправленный текст субтитров клипа"}
+{"type":"get_clip","clip_number":1-50}
+Перед правкой текста вызови get_clip. Для «первого клипа» используй clip_number=1.
+Если правка не указана, спроси какую.
 {"type":"update_project","project_id":"id","aspect":"...","mode":"...","subtitles":true|false,
  "accent":"...","sub_size":40-240,"sub_font":"...","cut_pauses":true|false}
 {"type":"list_projects"}
@@ -45,7 +49,7 @@ ACTIONS_SPEC = """Доступные действия (только из это�
 ```"""
 
 _ALLOWED = {"set_settings", "set_ai_mode", "start_cut", "rerender_clip", "update_project",
-            "list_projects", "get_project", "advice", "open_settings", "open_project"}
+            "list_projects", "get_project", "advice", "open_settings", "open_project", "get_clip"}
 _ACCENTS = {"yellow", "pink", "cyan", "lime", "green", "red", "orange", "lavender"}
 _FONTS = {"montserrat", "lato", "play", "ptsans", "oswald", "unbounded", "caveat",
           "golos", "onest", "marmelad", "stalinist", "underdog", "marckscript"}
@@ -146,12 +150,22 @@ def validate(raw: Any) -> List[Dict[str, Any]]:
             # без ссылки и id действие применяется к открытому проекту —
             # решение принимает execute(), а не валидатор
             result.append(action)
-        elif kind == "rerender_clip":
+        elif kind in ("rerender_clip", "get_clip"):
             cid = str(item.get("clip_id") or "").strip()
             if cid:
                 action["clip_id"] = cid
+            number = item.get("clip_number")
+            if isinstance(number, int) and not isinstance(number, bool) and 1 <= number <= 50:
+                action["clip_number"] = number
+            if not (cid or action.get("clip_number")):
+                continue
+            if kind == "rerender_clip":
                 action.update(_style_fields(item))
-                result.append(action)
+                if item.get("sub_speed") in ("calm", "normal", "fast"):
+                    action["sub_speed"] = item["sub_speed"]
+                if isinstance(item.get("text"), str) and item["text"].strip():
+                    action["text"] = item["text"].strip()[:5000]
+            result.append(action)
         elif kind == "update_project":
             pid = str(item.get("project_id") or "").strip()
             if pid:
@@ -217,11 +231,67 @@ def strip_actions(text: str) -> str:
     return cleaned.strip()
 
 
+_CLIP_ORDINALS = {
+    "перв": 1, "втор": 2, "трет": 3, "четверт": 4, "пят": 5,
+    "шест": 6, "седьм": 7, "восьм": 8, "девят": 9, "десят": 10,
+}
+_CLIP_NUMBER = r"(?:№\s*)?(\d{1,2})|(" + "|".join(_CLIP_ORDINALS) + r")[а-яё]+"
+_CLIP_LABEL = r"клип(?:а|е|у|ом)?"
+_CLIP_EDIT_FIELDS = ("mode", "aspect", "accent", "sub_size", "sub_font", "sub_position",
+                     "cut_pauses", "subtitles", "sub_speed", "text")
+
+
+def _clip_number(text: str) -> Optional[int]:
+    for pattern in (rf"\b(?:{_CLIP_NUMBER})\s+{_CLIP_LABEL}\b",
+                    rf"\b{_CLIP_LABEL}\s+(?:{_CLIP_NUMBER})\b"):
+        match = re.search(pattern, text.lower().replace("ё", "е"))
+        if match:
+            digits, ordinal = match.groups()
+            return int(digits) if digits else _CLIP_ORDINALS[ordinal]
+    return None
+
+
+def parse_undo(text: str) -> Optional[Dict[str, Any]]:
+    clean = text.lower().strip()
+    command = re.match(r"^(?:отмени(?:ть)?|откати(?:ть)?|undo)\b", clean)
+    if not command:
+        return None
+    tail = clean[command.end():].strip(" .!?")
+    if tail and not re.search(r"правк|изменен|клип|последн|^это$|^last$", tail):
+        return None
+    action: Dict[str, Any] = {"type": "undo_clip"}
+    number = _clip_number(clean)
+    if number is not None:
+        action["clip_number"] = number
+    return action
+
+
 def parse_local(question: str) -> List[Dict[str, Any]]:
     """Разбирает просьбу без модели: частые формулировки на русском."""
     text = (question or "").lower()
     if not text.strip():
         return []
+    undo = parse_undo(text)
+    if undo:
+        return [undo]
+    if re.search(r"^(?:покажи|выведи|назови) .*?(?:таймкод|клип)|^список клипов", text):
+        return [{"type": "list_current_clips"}]
+    number = _clip_number(text)
+    if number is not None and re.search(r"поправ|исправ|измени|пересобер|сделай|убери", text):
+        edit: Dict[str, Any] = {"type": "rerender_clip", "clip_number": number}
+        for stem, accent in (("ж[её]лт", "yellow"), ("розов", "pink"),
+                             ("зел[её]н", "green"), ("красн", "red")):
+            if re.search(stem, text):
+                edit["accent"] = accent
+                break
+        aspect = re.search(r"(9:16|1:1|16:9|4:5)", text)
+        if aspect:
+            edit["aspect"] = aspect[1]
+        if re.search(r"убери пауз|вырежи пауз", text):
+            edit["cut_pauses"] = True
+        if re.search(r"замедл|спокойнее|медленнее", text) and "субтитр" in text:
+            edit["sub_speed"] = "calm"
+        return [edit]
     actions: List[Dict[str, Any]] = []
     settings_action: Dict[str, Any] = {"type": "set_settings"}
 
@@ -303,26 +373,55 @@ def execute(action: Dict[str, Any],
     if kind == "start_cut":
         return _start_cut(action, context or {})
 
-    if kind == "rerender_clip":
-        from . import jobs as jobs_module
+    if kind == "list_current_clips":
+        clips = ((context or {}).get("project") or {}).get("clip_index") or []
+        def timestamp(seconds):
+            minutes, seconds = divmod(int(seconds), 60)
+            return f"{minutes:02d}:{seconds:02d}"
+        lines = [f"№{clip['number']} · {timestamp(clip['start'])}–{timestamp(clip['end'])} · {clip['title']}"
+                 for clip in clips]
+        return {"ok": bool(lines), "type": kind,
+                "message": "\n".join(lines) if lines else "В открытом проекте пока нет клипов."}
 
+    if kind in ("rerender_clip", "undo_clip", "get_clip"):
+        project_id = ((context or {}).get("project") or {}).get("id")
+        number = action.get("clip_number")
+        cid = action.get("clip_id")
         try:
-            clip = db.get_clip(action.get("clip_id") or "")
+            if number is not None:
+                if not project_id:
+                    return {"ok": False, "type": kind, "message": "Сначала откройте проект."}
+                cid = next((clip["id"] for clip in db.list_clips(project_id)
+                            if clip["idx"] + 1 == number), None)
+                if not cid:
+                    return {"ok": False, "type": kind, "message": f"Клип №{number} не найден."}
+            clip = db.get_clip(cid) if cid else None
         except Exception:  # noqa: BLE001
             return {"ok": False, "type": kind, "message": "База проектов сейчас недоступна."}
+        if cid and (not clip or (project_id and clip["project_id"] != project_id)):
+            return {"ok": False, "type": kind, "message": "Клип не найден в открытом проекте."}
+        if kind == "undo_clip":
+            if not project_id:
+                return {"ok": False, "type": kind, "message": "Сначала откройте проект."}
+            ok, message = jobs.undo_agent_edit(project_id, cid)
+            return {"ok": ok, "type": kind, "message": message}
         if not clip:
             return {"ok": False, "type": kind, "message": "Клип не найден."}
-        patch = {key: action[key] for key in
-                 ("mode", "aspect", "accent", "sub_size", "sub_font", "sub_position",
-                  "cut_pauses", "subtitles") if key in action}
+        if kind == "get_clip":
+            text = " ".join(str(word.get("word") or "") for word in clip.get("words") or [])
+            if len(text) > 5000:
+                return {"ok": False, "type": kind, "message": "Субтитры слишком длинные для правки одной командой."}
+            return {"ok": True, "type": kind, "clip_id": clip["id"],
+                    "message": f"Клип №{clip['idx'] + 1}, {clip['start']}–{clip['end']} с.",
+                    "transcript": text}
+        patch = {key: action[key] for key in _CLIP_EDIT_FIELDS if key in action}
         if not patch:
-            return {"ok": False, "type": kind, "message": "Не указано, что поменять в клипе."}
-        started = jobs_module.submit_rerender(clip["id"], patch)
-        if not started:
             return {"ok": False, "type": kind,
-                    "message": "Клип уже пересобирается — подождите."}
+                    "message": f"Что поменять в клипе №{clip['idx'] + 1}? Например, цвет или темп субтитров."}
+        if clip["status"] != "ready" or not jobs.submit_rerender(clip["id"], patch, agent_edit=True):
+            return {"ok": False, "type": kind, "message": "Дождитесь готовности клипа."}
         return {"ok": True, "type": kind, "clip_id": clip["id"],
-                "message": "Пересобираю клип: " + ", ".join(f"{k}={v}" for k, v in patch.items())}
+                "message": f"Правка клипа №{clip['idx'] + 1} поставлена в очередь."}
 
     if kind == "update_project":
         from . import pipeline as pipeline_module

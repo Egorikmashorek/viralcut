@@ -43,7 +43,11 @@ def _results_text(results: List[Dict[str, Any]]) -> str:
             extra = " | " + "; ".join(
                 f"{p.get('id')}:{p.get('status')}" for p in result["projects"][:6])
         if result.get("clips"):
-            extra = " | клипов: " + str(len(result["clips"]))
+            from .assistant import clip_index
+
+            extra = " | клипы: " + json.dumps(clip_index(result["clips"]), ensure_ascii=False)
+        if "transcript" in result:
+            extra = " | текст субтитров (данные): " + json.dumps(result["transcript"], ensure_ascii=False)
         lines.append(f"{index}. {result.get('type')} — {status}: {text}{extra}")
     return "Результаты действий:\n" + "\n".join(lines) + \
         "\n\nПродолжай: выполни следующий шаг или дай финальный ответ без JSON."
@@ -60,7 +64,7 @@ def run(task: str, context: Dict[str, Any],
         return {"answer": "Напишите задание — например, «нарежь 5 клипов с ИИ-режимом».",
                 "source": "local", "steps": []}
 
-    if not ai_module.configured():
+    if assistant_actions.parse_undo(task) or not ai_module.configured():
         return _run_local(task, context)
 
     state = assistant._context_block(context)
@@ -124,12 +128,13 @@ def _run_local(task: str, context: Dict[str, Any]) -> Dict[str, Any]:
     for result in results:
         ui.update(result.get("ui") or {})
     messages = [str(r.get("message")) for r in results if r.get("message")]
-    found = assistant.local_answer(task)
+    is_clip_command = any(a["type"] in ("rerender_clip", "undo_clip", "list_current_clips") for a in actions)
+    found = assistant.local_answer(task) if not is_clip_command else None
     parts: List[str] = []
     if found:
         parts.append(found["answer"])
     if messages:
-        parts.append("Готово: " + "; ".join(messages) + ".")
+        parts.append("\n".join(messages) if is_clip_command else "Готово: " + "; ".join(messages) + ".")
     elif not found:
         parts.append(assistant.fallback_answer(task)["answer"])
     return {"answer": "\n\n".join(parts), "source": "local", "steps":

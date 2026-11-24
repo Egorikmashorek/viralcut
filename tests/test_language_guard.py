@@ -17,13 +17,13 @@ class SubtitleChoiceTest(unittest.TestCase):
         files = [Path("/tmp/subs.en.vtt"), Path("/tmp/subs.ru.vtt")]
         self.assertTrue(downloader.pick_subtitle_file(files, "en").endswith("subs.en.vtt"))
 
-    def test_unknown_language_falls_back_to_russian(self):
-        files = [Path("/tmp/subs.en.vtt"), Path("/tmp/subs.ru.vtt")]
-        self.assertTrue(downloader.pick_subtitle_file(files, "de").endswith("subs.ru.vtt"))
+    def test_refuses_other_languages(self):
+        self.assertIsNone(downloader.pick_subtitle_file([Path("subs.en.vtt")], "ru"))
+        self.assertIsNone(downloader.pick_subtitle_file([Path("subs.ru.vtt")], "en"))
 
-    def test_only_english_still_used(self):
-        self.assertTrue(downloader.pick_subtitle_file([Path("/tmp/subs.en.vtt")], "ru")
-                        .endswith("subs.en.vtt"))
+    def test_accepts_regional_language(self):
+        self.assertEqual(downloader.pick_subtitle_file([Path("subs.en-US.vtt")], "en"),
+                         "subs.en-US.vtt")
 
     def test_empty_list(self):
         self.assertIsNone(downloader.pick_subtitle_file([], "ru"))

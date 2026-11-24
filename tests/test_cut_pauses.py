@@ -238,6 +238,37 @@ class AudioTrackTest(unittest.TestCase):
 
 
 class RerenderRecoveryTest(unittest.TestCase):
+    def test_agent_undo_restores_snapshot_and_respects_later_edits(self):
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(db, "DB_PATH", Path(folder) / "test.db"), \
+             mock.patch.object(jobs._clip_pool, "submit", side_effect=lambda work: work()), \
+             mock.patch.object(jobs, "_agent_edits", []):
+            db.init_db()
+            project = db.create_project("local:source", {})
+            clip = db.add_clip(project["id"], 0, 0, 5, 1.0, "Тест", "", "",
+                               [{"word": "Привет", "start": 0.1, "end": 0.9}],
+                               {"accent": "pink"}, status="ready")
+            pid, cid = project["id"], clip["id"]
+
+            def render_saved(clip_id, payload, *, restore=None):
+                current = db.get_clip(clip_id)
+                fields = restore if restore is not None else {"settings": {**current["settings"], **payload}}
+                db.update_clip(clip_id, status="ready", **fields)
+                return db.get_clip(clip_id)
+
+            with mock.patch.object(pipeline, "rerender_clip", side_effect=render_saved):
+                self.assertTrue(jobs.submit_rerender(cid, {"accent": "yellow"}, agent_edit=True))
+                self.assertTrue(jobs.submit_rerender(cid, {"accent": "green"}, agent_edit=True))
+                self.assertTrue(jobs.undo_agent_edit(pid, cid)[0])
+                self.assertEqual(db.get_clip(cid)["settings"]["accent"], "yellow")
+                self.assertTrue(jobs.undo_agent_edit(pid)[0])
+                self.assertEqual(db.get_clip(cid)["settings"], clip["settings"])
+                self.assertEqual(db.get_clip(cid)["words"], clip["words"])
+                self.assertTrue(jobs.submit_rerender(cid, {"accent": "yellow"}, agent_edit=True))
+                db.update_clip(cid, settings={"accent": "cyan"})
+                self.assertFalse(jobs.undo_agent_edit(pid, cid)[0])
+                self.assertEqual(db.get_clip(cid)["settings"]["accent"], "cyan")
+
     def test_failed_job_leaves_old_clip_ready_and_its_settings_intact(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "clip.mp4"

@@ -7,7 +7,7 @@
 <p align="center">
   <b>Длинное видео → вирусные вертикальные клипы.</b><br/>
   Подкасты, интервью, вебинары и стримы — в готовые Shorts, Reels и TikTok<br/>
-  с умным кадрированием, караоке-субтитрами и хуком. Всё локально: видео не уходит в облако.
+  с умным кадрированием, караоке-субтитрами и хуком. Нарезка работает локально, облачный ИИ — по выбору.
 </p>
 
 <p align="center">
@@ -34,33 +34,40 @@
 
 ---
 
-## Скачать
+## Скачать ViralCut 1.6
 
-| Платформа | Файл | Размер | Что внутри |
-|---|---|---|---|
-| **macOS 12+** (Apple Silicon) | [`ViralCut-1.5.18.dmg`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.18.dmg) | 637 МБ | Модель Whisper, ffmpeg, шрифты, PO-провайдер |
-| **macOS 12+** (Intel) | [`ViralCut-1.5.18-intel.dmg`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.18-intel.dmg) | 691 МБ | То же для Intel Mac, считает на дискретной карте |
-| **Windows 10/11 x64** | [`ViralCut-1.5.18-windows-x64.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.18-windows-x64.zip) | 642 МБ | `ViralCut.exe`, модель, ffmpeg, шрифты |
-| **Windows, без установки** | [`ViralCut-1.5.18-windows-x64-portable.zip`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.18-windows-x64-portable.zip) | 690 МБ | Python и зависимости внутри: распаковать и запустить `ViralCut.bat` |
+| Платформа | Архив | Как открыть |
+|---|---|---|
+| **macOS 12+ · Apple Silicon** | [ZIP для M‑серии][mac-arm] | Распакуйте и перенесите `ViralCut.app` в «Программы» |
+| **macOS 12+ · Intel** | [ZIP для Intel][mac-intel] | Распакуйте и перенесите `ViralCut.app` в «Программы» |
+| **Windows 10/11 · x64** | [Переносимый ZIP][windows] | Распакуйте весь архив и запустите `ViralCut.exe` |
 
-ZIP-варианты для macOS: [`arm64`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.18-macOS-arm64.zip) и
-[`x86_64`](https://github.com/vanwild11/viralcut/releases/latest/download/ViralCut-1.5.18-macOS-x86_64.zip).
+В архивы входят FFmpeg, модель Whisper и шрифты. Контрольные суммы и исходники доступны на [странице релиза v1.6.0][release].
 
-Актуальный релиз — **[1.5.18](https://github.com/vanwild11/viralcut/releases/latest)**:
-ИИ-агент, который выполняет задания по шагам, ИИ-режим нарезки, помощник внутри
-приложения, любая модель (DeepSeek, Polza.ai, OpenAI, локальная Ollama) и
-жёсткие лимиты на процессор и видеокарту. Контрольные суммы — в
-`SHA256SUMS-1.5.18.txt` рядом с файлами релиза.
+## Что нового в 1.6
+
+| Возможность | Как попробовать |
+|---|---|
+| Помощник с контекстом клипа | Откройте проект и напишите «Покажи таймкоды» или «Сделай субтитры в первом клипе жёлтыми» |
+| Отмена правки агента | Напишите «Отмени последнюю правку». История действует до перезапуска |
+| Выбор качества YouTube | Выберите Full HD 1080p, 720p или 480p. При HTTP 503 ViralCut повторит попытку в выбранном качестве |
+| Субтитры на языке речи | Оставьте «Авто» или явно выберите русский либо английский |
+| Новые шрифты | В списке субтитров появились Geologica Bold, IBM Plex Sans Condensed SemiBold и Rubik Mono One |
+
+[release]: https://github.com/vanwild11/viralcut/releases/tag/v1.6.0
+[mac-arm]: https://github.com/vanwild11/viralcut/releases/download/v1.6.0/ViralCut-1.6.0-macOS-arm64.zip
+[mac-intel]: https://github.com/vanwild11/viralcut/releases/download/v1.6.0/ViralCut-1.6.0-macOS-x86_64.zip
+[windows]: https://github.com/vanwild11/viralcut/releases/download/v1.6.0/ViralCut-1.6.0-windows-x64-portable.zip
 
 ## Почему ViralCut
 
-- **Всё локально.** Видео, звук и текст не отправляются на серверы: Whisper, ffmpeg и
-  OpenCV работают на вашем компьютере. Нет аккаунтов, API-ключей и подписок.
+- **Локальная обработка.** Whisper, FFmpeg и OpenCV работают на вашем компьютере.
+  При использовании облачной модели запросы и относящийся к заданию текст передаются выбранному провайдеру.
 - **Один запуск — пачка клипов.** До 50 вертикальных роликов с хуком, субтитрами и
   умным кадрированием по лицу.
 - **Прямой эфир — на лету.** Клипы появляются, пока стрим ещё идёт; готовый клип можно
   перерендерить из записи.
-- **Субтитры, которые читают.** Караоке-подсветка, спокойный темп, 24 шрифта и загрузка
+- **Субтитры, которые читают.** Караоке-подсветка, спокойный темп, встроенные шрифты и загрузка
   своих TTF/OTF.
 - **Без сюрпризов.** Понятные статусы, повтор упавшей обработки и видимый откат качества.
 
@@ -185,9 +192,17 @@ videotoolbox/nvenc/qsv, рендер молча идёт на libx264.
 
 ## Установка
 
+1. Выберите архив для своей платформы в разделе «Скачать».
+2. Откройте приложение и укажите локальное видео или вставьте ссылку.
+3. Выберите язык речи и параметры нарезки. Для YouTube укажите нужное качество.
+4. После обработки откройте клип для проверки и скачайте MP4 или SRT.
+
+Для локальной нарезки ключ не нужен. Чтобы подключить модель, откройте настройки ИИ, выберите провайдера и сохраните ключ. Для выполнения поручений по шагам включите агент-режим.
+
+
 ### Windows 10/11
 
-Скачайте переносимый ZIP из [последнего релиза](https://github.com/vanwild11/viralcut/releases/latest), распакуйте весь архив и запустите `ViralCut.bat`.
+Скачайте переносимый ZIP из [последнего релиза](https://github.com/vanwild11/viralcut/releases/latest), распакуйте весь архив и запустите `ViralCut.exe`.
 Если Python нет и вы запускаете из исходников — используйте `install_windows.bat`
 (поставит Python 3.12 и WebView2 через winget).
 Подробнее: [docs/WINDOWS.md](docs/WINDOWS.md).

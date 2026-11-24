@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # Переносимая Windows-сборка «всё внутри»: встроенный Python, зависимости,
 # модель Whisper и Node/PO-провайдер. Пользователь распаковывает ZIP и запускает
-# ViralCut.bat — ничего не скачивается и не устанавливается.
-#
-# Это НЕ .exe (PyInstaller не кросс-компилирует с macOS). Нужен, чтобы отдать
-# полноценную сборку без Windows-машины; exe собирается в CI или build_windows.ps1.
+# ViralCut.exe. Запускатель использует Python и зависимости из архива.
+# Для сборки запускателя нужен Python с pip и distlib.
 #
 # Подготовка колёс (один раз):
 #   python tools/resolve_windows_wheels.py --dest build/windows-wheels
@@ -14,7 +12,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="$(python3 tools/version.py)"
+BUILD_PYTHON="${BUILD_PYTHON:-python3}"
+VERSION="$("$BUILD_PYTHON" tools/version.py)"
 PY_EMBED_VER="${PY_EMBED_VER:-3.12.10}"
 WHEELS="${WHEELS:-build/windows-wheels}"
 MODEL="${MODEL:-build/whisper-small}"
@@ -184,7 +183,7 @@ write("README-WINDOWS-PORTABLE.txt", f'''ViralCut {version} — переноси
 Запуск
 ------
 1. Распакуйте папку целиком (не запускайте из ZIP-архива).
-2. Двойной клик по ViralCut.bat (или ViralCut.vbs — без мелькания консоли).
+2. Двойной клик по ViralCut.exe.
 
 Если окно не открылось
 ----------------------
@@ -214,6 +213,8 @@ write("README-WINDOWS-PORTABLE.txt", f'''ViralCut {version} — переноси
 - YouTube HD зависит от PO-token провайдера (Node внутри); при сбое — SD.
 ''')
 PY
+
+"$BUILD_PYTHON" tools/build_windows_launcher.py "$APPDIR"
 
 mkdir -p "$OUTDIR"
 rm -f "$OUT"

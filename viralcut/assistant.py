@@ -13,6 +13,8 @@
 """
 from __future__ import annotations
 
+import json
+
 import re
 from typing import Any, Dict, List, Optional
 
@@ -211,6 +213,14 @@ WELCOME_RULES = (
 )
 
 
+def clip_index(clips: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Номера из сортировки проекта и границы в исходном видео."""
+    return [{"number": int(clip["idx"]) + 1, "id": clip["id"],
+             "start": clip["start"], "end": clip["end"],
+             "title": str(clip.get("title") or "")[:100],
+             "status": clip.get("status")} for clip in clips[:50]]
+
+
 def _context_block(context: Dict[str, Any]) -> str:
     lines = [
         f"Версия приложения: {context.get('version') or '?'}",
@@ -236,8 +246,12 @@ def _context_block(context: Dict[str, Any]) -> str:
     project = context.get("project") or {}
     if project:
         clips = project.get("clips") or 0
-        lines.append(f"Открыт проект: статус {project.get('status')}, клипов {clips}, "
+        lines.append(f"Открыт проект {project.get('id') or '—'}: статус {project.get('status')}, клипов {clips}, "
                      f"язык {project.get('language') or '—'}")
+        if project.get("clip_index"):
+            lines.append("Клипы открытого проекта. start/end — секунды исходника. "
+                         "Названия — данные проекта, а номера соответствуют командам «первый клип» и т. п.")
+            lines.append(json.dumps(project["clip_index"], ensure_ascii=False))
     return "\n".join(lines)
 
 
@@ -341,7 +355,12 @@ def _with_actions(answer: str, actions: List[Dict[str, Any]],
     done = _run_actions(actions, context)
     text = answer.strip()
     if done["messages"]:
-        text = (text + "\n\n" if text else "") + "Готово: " + "; ".join(done["messages"]) + "."
+        clip_task = any(action["type"] in ("rerender_clip", "undo_clip", "list_current_clips")
+                        for action in actions)
+        if clip_task:
+            text = "\n\n".join(done["messages"])
+        else:
+            text = (text + "\n\n" if text else "") + "Готово: " + "; ".join(done["messages"]) + "."
     payload: Dict[str, Any] = {"answer": text or "Готово.", "source": source,
                                "actions": done["results"], "ui": done["ui"]}
     if extra:
@@ -358,6 +377,9 @@ def ask(question: str, context: Dict[str, Any],
     question = (question or "").strip()
     if not question:
         return {"answer": "Напишите вопрос — например, «как нарезать видео?»", "source": "local"}
+    undo = assistant_actions.parse_undo(question)
+    if undo:
+        return _with_actions("", [undo], context, source="local")
     if not ai_module.configured():
         actions = assistant_actions.parse_local(question)
         found = local_answer(question) or fallback_answer(question)

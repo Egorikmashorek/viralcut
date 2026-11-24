@@ -79,15 +79,24 @@ def _env_key() -> str:
     return ""
 
 
-def key() -> str:
-    """Ключ: переменная окружения важнее сохранённого в настройках."""
-    env = _env_key()
-    if env:
-        return env
+def key(conf: Optional[Dict[str, str]] = None) -> str:
+    """Возвращает ключ только для API, которому он был назначен."""
     try:
         from . import settings
 
-        return str(settings.get().get("ai_key") or "").strip()
+        data = settings.get()
+        current_scope = settings.ai_key_scope(data)
+        scope = [conf["provider"], conf["base"]] if conf else current_scope
+        if scope == data.get("ai_key_scope", current_scope):
+            saved = str(data.get("ai_key") or "").strip()
+            if saved:
+                return saved
+        provider, base = scope
+        if provider in ("deepseek", "openai") and base == PROVIDERS[provider]["base"]:
+            named = os.environ.get(provider.upper() + "_API_KEY", "").strip()
+            if named:
+                return named
+        return os.environ.get("VIRALCUT_AI_KEY", "").strip() if scope == current_scope else ""
     except Exception:  # noqa: BLE001
         return ""
 
@@ -118,7 +127,7 @@ def configured() -> bool:
     conf = _conf()
     if _keyless(conf["provider"]):
         return bool(conf["base"] and conf["model"])
-    return bool(key() and conf["base"] and conf["model"])
+    return bool(key(conf) and conf["base"] and conf["model"])
 
 
 def local_server(base: Optional[str] = None) -> Dict[str, Any]:
@@ -147,7 +156,7 @@ def local_server(base: Optional[str] = None) -> Dict[str, Any]:
 def status() -> Dict[str, Any]:
     """Что показывать в настройках: без самого ключа."""
     conf = _conf()
-    saved = key()
+    saved = key(conf)
     return {
         "provider": conf["provider"],
         "providers": [{"key": k, "label": v["label"], "base": v["base"],
@@ -203,7 +212,7 @@ def models(force: bool = False, provider: Optional[str] = None) -> Dict[str, Any
     if not conf["base"]:
         raise AIError("Не выбран адрес API. Укажите базовый URL своего сервера.")
     request = urllib.request.Request(f"{conf['base']}/models", method="GET")
-    api_key = key()
+    api_key = key(conf)
     if api_key:
         request.add_header("Authorization", f"Bearer {api_key}")
     try:
@@ -454,7 +463,7 @@ def plan_clips(segments: List[Dict[str, Any]], duration: float,
     не делает — применение остаётся за pipeline.
     """
     conf = _conf()
-    api_key = key() or ("local" if _keyless(conf["provider"]) else "")
+    api_key = key(conf) or ("local" if _keyless(conf["provider"]) else "")
     if not api_key:
         raise AIError("Не задан ключ ИИ. Откройте настройки → «ИИ-помощник» и вставьте ключ.")
     if not conf["base"] or not conf["model"]:
@@ -506,7 +515,7 @@ def chat(messages: List[Dict[str, str]], *, max_tokens: int = 700,
          temperature: float = 0.3) -> Dict[str, Any]:
     """Универсальный запрос к выбранной модели (используется помощником)."""
     conf = _conf()
-    api_key = key() or ("local" if _keyless(conf["provider"]) else "")
+    api_key = key(conf) or ("local" if _keyless(conf["provider"]) else "")
     if not api_key:
         raise AIError("Не задан ключ ИИ.")
     if not conf["base"] or not conf["model"]:
@@ -527,7 +536,7 @@ def chat(messages: List[Dict[str, str]], *, max_tokens: int = 700,
 def advice(project: Dict[str, Any], clip: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Совет по проекту/клипу. Бросает AIError с понятным текстом."""
     conf = _conf()
-    api_key = key() or ("local" if _keyless(conf["provider"]) else "")
+    api_key = key(conf) or ("local" if _keyless(conf["provider"]) else "")
     if not api_key:
         raise AIError("Не задан ключ ИИ. Откройте настройки → «ИИ-помощник» и вставьте ключ.")
     if not conf["base"] or not conf["model"]:

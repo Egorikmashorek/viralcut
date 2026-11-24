@@ -131,6 +131,18 @@ FONTS: Dict[str, Dict[str, Any]] = {
         "label": "Underdog", "family": "Underdog",
         "file": "Underdog-Regular.ttf", "cap": 0.710, "avg": 0.943,
     },
+    "geologica": {
+        "label": "Geologica Bold", "family": "Geologica Bold",
+        "file": "Geologica-Bold.ttf", "cap": 0.700, "avg": 1.087,
+    },
+    "ibmplexcond": {
+        "label": "IBM Plex Sans Condensed SemiBold", "family": "IBM Plex Sans Cond SmBld",
+        "file": "IBMPlexSansCondensed-SemiBold.ttf", "cap": 0.698, "avg": 0.923,
+    },
+    "rubikmono": {
+        "label": "Rubik Mono One", "family": "Rubik Mono One",
+        "file": "RubikMonoOne-Regular.ttf", "cap": 0.700, "avg": 1.488,
+    },
 }
 
 POSITIONS = ("bottom", "middle", "top")

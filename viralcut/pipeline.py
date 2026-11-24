@@ -36,6 +36,7 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     "sub_offset": 0,
     "sub_speed": "calm",
     "max_height": 1080,
+    "exact_quality": False,
     "segments": False,
     "audio_track": 0,
     "sub_free": None,
@@ -93,6 +94,7 @@ def normalize_options(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         mh = int(opts.get("max_height", 1080))
     except Exception:
         mh = 1080
+    opts["exact_quality"] = bool(opts.get("exact_quality"))
     opts["max_height"] = mh if mh in (1080, 720, 480, 360) else 1080
     # эконом-режим отключён: качество выбирается явно (max_height)
     opts["segments"] = False
@@ -172,6 +174,10 @@ def _download_phase(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
                     info = utils.probe(cached)
                 except Exception:  # noqa: BLE001
                     break
+                exact = opts.get("exact_quality") and downloader.is_youtube(project["url"])
+                resolution = min(info.get("width") or 0, info.get("height") or 0)
+                if exact and (resolution != opts["max_height"] or not info.get("has_audio")):
+                    continue
                 if info.get("duration", 0) >= 5:
                     progress(0.98, "Исходник уже скачан · пропускаю загрузку")
                     _update(pid, source=str(cached), duration=round(info["duration"], 2))
@@ -196,6 +202,7 @@ def _download_phase(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
                     progress=lambda p, st: progress(p * 0.9, st),
                     browser=opts.get("cookies_browser") or None,
                     force_hd=opts.get("force_hd", False),
+                    exact_quality=opts.get("exact_quality", False),
                     max_height=1080 if opts.get("force_hd") else int(opts.get("max_height", 1080)),
                 )
         except downloader.DownloadError as exc:
@@ -521,29 +528,21 @@ def process_project(pid: str) -> None:
             if info["audio_tracks"] > 1:
                 # У субтитров площадки нет привязки к выбранной звуковой дорожке.
                 raise RuntimeError("Не удалось распознать выбранную аудиодорожку. " + str(exc)[:300]) from exc
-            wanted = (opts.get("language") or "ru").lower()[:2]
-            sub_path = downloader.fetch_subtitles(project["url"], workdir,
-                                                  browser=opts.get("cookies_browser") or None,
-                                                  language=wanted)
-            if sub_path:
-                segs = utils.parse_vtt(Path(sub_path))
-                if segs:
-                    # Язык берём из имени файла, а не «ru по умолчанию»: иначе
-                    # английские субтитры подписывались как русские.
-                    actual = Path(sub_path).stem.split(".")[-1].lower() or wanted
-                    if actual[:2] != wanted:
-                        print(f"[subs] субтитров на «{wanted}» нет, взял «{actual}»",
-                              file=sys.stderr, flush=True)
-                    transcript = {"language": actual, "duration": duration, "segments": segs,
-                                  "engine": "source-subtitles"}
+            wanted = (opts.get("language") or "").lower()
+            if wanted and project["url"].startswith(("https://", "http://")):
+                sub_path = downloader.fetch_subtitles(
+                    project["url"], workdir, browser=opts.get("cookies_browser") or None,
+                    language=wanted,
+                )
+                if sub_path:
+                    segs = utils.parse_vtt(Path(sub_path))
+                    if segs and not transcribe.subtitle_script_mismatch(segs, wanted):
+                        transcript = {"language": wanted, "duration": duration, "segments": segs,
+                                      "engine": "source-subtitles"}
             if transcript is None:
-                raise RuntimeError("Не удалось распознать речь. " + str(exc)[:300]) from exc
+                hint = " Проверьте аудиодорожку или выберите язык речи вручную." if not wanted else ""
+                raise RuntimeError("Не удалось распознать речь. " + str(exc)[:300] + hint) from exc
 
-        asked = (opts.get("language") or "").lower()[:2]
-        got = (transcript.get("language") or "").lower()[:2]
-        if asked and got and asked != got:
-            print(f"[whisper] просили {asked!r}, распознано {got!r} — показываю фактический",
-                  file=sys.stderr, flush=True)
         _update(pid, language=transcript.get("language"))
         db.merge_meta(pid, {
             "engine": transcript.get("engine"),
@@ -890,7 +889,8 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
 
 
 def rerender_clip(clip_id: str, payload: Dict[str, Any],
-                  on_progress: Optional[Callable[[float], None]] = None) -> Dict[str, Any]:
+                  on_progress: Optional[Callable[[float], None]] = None, *,
+                  restore: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     clip = db.get_clip(clip_id)
     if not clip:
         raise RuntimeError("Клип не найден")
@@ -901,7 +901,7 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
     live_recording = (workdir / "segments" / "times.jsonl").exists()
     if not project.get("source") and not live_recording:
         raise RuntimeError("Исходное видео не найдено: запись эфира удалена или ещё не началась.")
-    settings = dict(clip["settings"])
+    settings = dict(restore["settings"] if restore is not None else clip["settings"])
     if settings.get("segments"):
         raise RuntimeError("Клип собран в экономном режиме из фрагмента. Шаблон меняется до запуска нарезки.")
     for key in ("aspect", "mode", "subtitles", "accent", "uppercase", "show_hook", "focus_x",
@@ -912,9 +912,11 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
     end = float(payload.get("end", clip["end"]))
     if end - start < 3:
         raise RuntimeError("Клип слишком короткий")
-    words = list(clip["words"] or [])
+    words = list((restore["words"] if restore is not None else clip["words"]) or [])
     opts = normalize_options(project.get("options"))
-    if not project.get("source"):
+    if restore is not None:
+        opts["audio_track"] = int(settings.get("audio_track", opts["audio_track"]))
+    elif not project.get("source"):
         from . import live
         # старые live-клипы хранили слова относительно окна эфира
         words = live._absolute_words(words, float(clip["start"]))
@@ -955,7 +957,7 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
         "title": payload.get("title", clip["title"]),
         "caption": payload.get("caption", clip["caption"]),
     }
-    updated = {**clip, **updates}
+    updated = {**clip, **updates, "settings": settings}
     if project.get("source"):
         _render_one(Path(project["source"]), workdir, updated, settings, on_progress, opts,
                     clip_updates=updates)

@@ -117,6 +117,67 @@ class YouTubeQualityTest(unittest.TestCase):
         ydl.assert_called_once()
         self.assertEqual(info, sd)
 
+    def test_probe_shows_three_youtube_choices_even_when_only_720_is_confirmed(self):
+        info = {"formats": [{"height": 720, "width": 1280, "vcodec": "avc1",
+                            "acodec": "aac", "format_id": "22"}]}
+        with mock.patch.object(downloader, "_youtube_info", return_value=(info, {}, "web")):
+            result = downloader.probe("https://youtu.be/example")
+        self.assertEqual([(o["height"], o["confirmed"]) for o in result["options"]],
+                         [(1080, False), (720, True), (480, False)])
+        self.assertEqual(result["recommended"], 720)
+
+    def test_503_retries_exact_youtube_quality(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dest = Path(directory)
+            seen = []
+
+            def attempt(_url, scratch, selector, *_args, **_kw):
+                seen.append(selector)
+                if len(seen) < 3:
+                    raise downloader.DownloadError("HTTP Error 503: Service Unavailable")
+                path = scratch / "source.mp4"
+                path.write_bytes(b"mp4")
+                return {"path": path}
+
+            with mock.patch.object(downloader, "_youtube_info", return_value=({}, {}, "web")), \
+                 mock.patch.object(downloader, "_attempt", side_effect=attempt), \
+                 mock.patch.object(downloader.time, "sleep") as pauses, \
+                 mock.patch.object(downloader.utils, "probe", return_value={
+                     "width": 720, "height": 1280, "has_audio": True
+                 }):
+                result = downloader.download("https://youtu.be/example", dest,
+                                             max_height=720, exact_quality=True)
+            self.assertEqual(seen, [seen[0]] * 3)
+            self.assertIn("[width=720]", seen[0])
+            self.assertEqual(pauses.call_args_list, [mock.call(1), mock.call(2)])
+            self.assertEqual(result["height"], 720)
+            self.assertTrue((dest / "source.mp4").is_file())
+
+    def test_exact_youtube_rejects_lower_res_and_exhausted_503(self):
+        for status in ("wrong_resolution", "503"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                dest = Path(directory)
+
+                def attempt(_url, scratch, *_args, **_kw):
+                    if status == "503":
+                        raise downloader.DownloadError("HTTP Error 503: Service Unavailable")
+                    path = scratch / "source.mp4"
+                    path.write_bytes(b"mp4")
+                    return {"path": path}
+
+                with mock.patch.object(downloader, "_youtube_info", return_value=({}, {}, "web")), \
+                     mock.patch.object(downloader, "_attempt", side_effect=attempt) as calls, \
+                     mock.patch.object(downloader.time, "sleep"), \
+                     mock.patch.object(downloader.utils, "probe", return_value={
+                         "width": 1280, "height": 720, "has_audio": True
+                     }):
+                    with self.assertRaisesRegex(downloader.DownloadError,
+                                                "HTTP 503" if status == "503" else "не отдал 1080p"):
+                        downloader.download("https://youtu.be/example", dest,
+                                            max_height=1080, exact_quality=True)
+                self.assertEqual(calls.call_count, 3 if status == "503" else 1)
+                self.assertEqual(list(dest.iterdir()), [])
+
     def test_hd_is_preferred_over_lower_avc_format(self):
         formats = [
             {"format_id": "18", "vcodec": "avc1", "acodec": "mp4a", "ext": "mp4", "height": 360},

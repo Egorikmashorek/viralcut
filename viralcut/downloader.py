@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 import shutil
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from . import utils
 from .config import ASSETS_DIR, ensure_path, ffmpeg, ffmpeg_bin_dir
 from .errors import Cancelled
 from .utils import subprocess_kwargs
@@ -43,7 +45,8 @@ def is_youtube(url: str) -> bool:
         from urllib.parse import urlparse
 
         host = (urlparse(url).hostname or "").lower()
-        return host.endswith("youtube.com") or host.endswith("youtu.be") or host.endswith("youtube-nocookie.com")
+        return any(host == domain or host.endswith("." + domain)
+                   for domain in ("youtube.com", "youtu.be", "youtube-nocookie.com"))
     except Exception:
         return False
 
@@ -62,9 +65,17 @@ def _setup_plugins() -> None:
 _setup_plugins()
 
 
+def _is_http_503(exc: Exception) -> bool:
+    return bool(re.search(r"\b503\b", str(exc)) and re.search(
+        r"http|service unavailable|status|\b503\b.*server", str(exc), re.I
+    ))
+
+
 def _fmt_err(exc: Exception) -> str:
     msg = str(exc)
     low = msg.lower()
+    if _is_http_503(exc):
+        return "Источник временно не ответил (HTTP 503). Повторите попытку позже."
     if "sign in" in low or "login" in low or "cookies" in low or "not a bot" in low:
         return ("Сайт требует авторизацию. Включите «Cookies из браузера» в настройках "
                 "или загрузите видео файлом.")
@@ -169,7 +180,8 @@ def _pot_enabled() -> bool:
 
 def _attempt(url: str, dest_dir: Path, fmt: str, clients: Optional[List[str]],
              browser: Optional[str], progress: ProgressCb,
-             pot: bool = False, extractor_args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+             pot: bool = False, extractor_args: Optional[Dict[str, Any]] = None,
+             required_fragments: bool = False) -> Dict[str, Any]:
     import yt_dlp
 
     ensure_path()
@@ -234,6 +246,7 @@ def _attempt(url: str, dest_dir: Path, fmt: str, clients: Optional[List[str]],
         "restrictfilenames": True,
         "retries": 3,
         "fragment_retries": 5,
+        "skip_unavailable_fragments": not required_fragments,
         "concurrent_fragment_downloads": 4,
         "writesubtitles": False,
         "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}],
@@ -353,7 +366,7 @@ def _youtube_candidates(pot: bool) -> List[tuple[str, Dict[str, Any]]]:
 
 def _youtube_info(url: str, browser: Optional[str], pot: bool,
                   progress: ProgressCb = None, *,
-                  preferred_height: int = 1080) -> tuple[Dict[str, Any], Dict[str, Any], str]:
+                  preferred_height: int = 1080, exact_quality: bool = False) -> tuple[Dict[str, Any], Dict[str, Any], str]:
     """При доступном провайдере проверяет нужное качество и сохраняет запасной вариант."""
     import yt_dlp
 
@@ -394,7 +407,12 @@ def _youtube_info(url: str, browser: Optional[str], pot: bool,
         print(f"[youtube] клиент «{label}»: {height}p", file=sys.stderr)
         if height > best_height:
             best, best_height = (info, args, label), height
-        if not pot or height >= preferred_height:
+        if exact_quality:
+            if any(_resolution(f) == preferred_height and (f.get("vcodec") or "none") != "none"
+                   for f in info.get("formats") or []):
+                best = (info, args, label)
+                break
+        elif not pot or height >= preferred_height:
             break
     if best is not None:
         if progress:
@@ -438,11 +456,118 @@ def _pick_format(info: Dict[str, Any], max_height: int) -> tuple[str, int]:
     return str(video["format_id"]), height
 
 
+YOUTUBE_QUALITIES = (1080, 720, 480)
+
+
+def _resolution(info: Dict[str, Any]) -> int:
+    dimensions = [int(info[key]) for key in ("width", "height") if info.get(key)]
+    return min(dimensions, default=0)
+
+
+def _retry_503(action: Callable[[], Any], quality: int, progress: ProgressCb):
+    for attempt in range(3):
+        try:
+            return action()
+        except Cancelled:
+            raise
+        except Exception as exc:
+            if not _is_http_503(exc) or attempt == 2:
+                raise
+            if progress:
+                progress(0.02, f"Источник ответил 503 · повторяю {quality}p")
+            time.sleep(attempt + 1)
+
+
+def _download_exact_youtube(url: str, dest_dir: Path, quality: int,
+                            browser: Optional[str], progress: ProgressCb) -> Dict[str, Any]:
+    pot = _pot_enabled()
+    # У Shorts нужная ступень указана шириной. В обоих случаях ограничиваем
+    # вторую сторону снизу, чтобы выбрать разрешение по короткой стороне.
+    video = f"[height={quality}][width>={quality}]"
+    vertical = f"[width={quality}][height>={quality}]"
+    filters = (video, vertical)
+    selector = "/".join(
+        [f"bv{f}+ba" for f in filters] + [f"b{f}" for f in filters]
+    )
+    exact_selector = selector
+    args = None
+    label = "YouTube"
+    try:
+        info, args, label = _youtube_info(url, browser, pot, progress, preferred_height=quality,
+                                          exact_quality=True)
+        matching = [f for f in info.get("formats") or []
+                    if (f.get("vcodec") or "none") == "none" or _resolution(f) == quality]
+        if any((f.get("vcodec") or "none") != "none" for f in matching):
+            fmt, _ = _pick_format({"formats": matching}, quality)
+            has_audio = "+" in fmt or any(
+                str(f.get("format_id")) == fmt and (f.get("acodec") or "none") != "none"
+                for f in matching
+            )
+            if has_audio:
+                selector = f"{fmt}/{selector}"
+    except DownloadError as exc:
+        print(f"[youtube] проверка {quality}p: {exc}", file=sys.stderr, flush=True)
+
+    try:
+        with tempfile.TemporaryDirectory(prefix=".youtube-", dir=dest_dir) as scratch:
+            work = Path(scratch)
+            try:
+                meta = _retry_503(lambda: _attempt(url, work, selector, None, browser, progress,
+                                                  pot=pot, extractor_args=args, required_fragments=True),
+                                  quality, progress)
+            except Cancelled:
+                raise
+            except Exception as exc:
+                from . import ytdlp_bin
+
+                if _is_http_503(exc) or not ytdlp_bin.enabled():
+                    raise
+                print(f"[youtube] {quality}p · встроенный загрузчик: {_fmt_err(exc)}",
+                      file=sys.stderr, flush=True)
+                try:
+                    with tempfile.TemporaryDirectory(prefix=".alternate-", dir=work) as alternate:
+                        alt = Path(alternate)
+                        meta = _retry_503(lambda: ytdlp_bin.download(
+                            url, alt, quality, browser, progress, format_selector=exact_selector,
+                        ), quality, progress)
+                        downloaded = Path(meta["path"])
+                        meta["path"] = downloaded.replace(work / downloaded.name)
+                        label = "yt-dlp"
+                except Cancelled:
+                    raise
+                except Exception as fallback_exc:
+                    if _is_http_503(fallback_exc):
+                        raise
+                    print(f"[youtube] {quality}p · запасной загрузчик: {_fmt_err(fallback_exc)}",
+                          file=sys.stderr, flush=True)
+                    raise exc from fallback_exc
+            path = Path(meta["path"])
+            actual = utils.probe(path)
+            resolution = _resolution(actual)
+            if resolution != quality or not actual.get("has_audio"):
+                raise DownloadError(
+                    f"YouTube не отдал {quality}p со звуком. Выберите другое качество или повторите попытку.")
+            target = dest_dir / path.name
+            path.replace(target)
+            meta.update(path=target, height=resolution, max_height=quality, fallback=False,
+                        quality=f"{quality}p · {label}")
+            return meta
+    except Cancelled:
+        raise
+    except Exception as exc:
+        if "requested format is not available" in str(exc).lower():
+            raise DownloadError(f"YouTube не отдал {quality}p со звуком. Выберите другое качество.") from exc
+        raise DownloadError(f"{quality}p: {_fmt_err(exc)}") from exc
+
+
 def download(url: str, dest_dir: Path, progress: ProgressCb = None,
              browser: Optional[str] = None, max_height: int = 1080,
-             force_hd: bool = False) -> Dict[str, Any]:
+             force_hd: bool = False, exact_quality: bool = False) -> Dict[str, Any]:
     """Скачивает видео. По умолчанию цель — 1080p, при блокировке видимый откат к SD."""
     dest_dir.mkdir(parents=True, exist_ok=True)
+
+    if is_youtube(url) and (force_hd or exact_quality) and max_height in YOUTUBE_QUALITIES:
+        return _download_exact_youtube(url, dest_dir, max_height, browser, progress)
 
     if max_height <= 360:
         hd_format = FORMAT_SD
@@ -531,6 +656,30 @@ def download(url: str, dest_dir: Path, progress: ProgressCb = None,
             if progress and not force_hd:
                 progress(0.01, f"{label} не удалось · пробую ниже качеством")
 
+    # Запасной движок: отдельный бинарник yt-dlp, который обновляется сам.
+    # Встроенный yt-dlp стареет быстрее, чем выходят релизы приложения.
+    try:
+        from . import ytdlp_bin
+
+        if ytdlp_bin.enabled():
+            if progress:
+                progress(0.02, "Пробую запасной движок загрузки…")
+            meta = ytdlp_bin.download(url, dest_dir, max_height, browser, progress)
+            try:
+                info = utils.probe(meta["path"])
+                meta["height"] = info.get("height") or None
+                meta["duration"] = info.get("duration") or None
+            except Exception:  # noqa: BLE001
+                pass
+            meta["quality"] = f"{meta.get('height') or max_height}p · yt-dlp"
+            meta["fallback"] = True
+            meta["fallback_reason"] = _fmt_err(last_error or DownloadError(""))
+            print(f"download ok (запасной движок): height={meta.get('height')}",
+                  file=sys.stderr)
+            return meta
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ytdlp-bin] не помог: {str(exc)[:200]}", file=sys.stderr)
+
     reason = _fmt_err(last_error or DownloadError("Не удалось скачать видео"))
     if force_hd:
         raise DownloadError(reason)
@@ -563,30 +712,21 @@ def download_file(url: str, dest_dir: Path, progress: ProgressCb = None) -> Dict
             "height": None}
 
 
-_SUB_LANG_ORDER = ("ru", "uk", "kk", "en")
-
-
 def pick_subtitle_file(files: List[Path], language: str = "ru") -> Optional[str]:
-    """Выбирает файл субтитров по языку, а не по алфавиту.
-
-    Раньше брали sorted()[0]: `subs.en.vtt` сортируется раньше `subs.ru.vtt`,
-    поэтому русские ролики получали английские субтитры (и это ещё подписывалось
-    как «Русский»). Теперь сначала ищем нужный язык, потом родственные, и только
-    если ничего не нашлось — любой файл.
-    """
-    if not files:
+    """Выбирает только субтитры на языке исходной речи."""
+    wanted = (language or "").strip().lower().replace("_", "-")
+    if not wanted:
         return None
-    wanted = (language or "ru").lower()[:2]
-
-    def lang_of(path: Path) -> str:
-        parts = path.stem.split(".")
-        return parts[-1].lower() if len(parts) > 1 else ""
-
-    for candidate in (wanted, *_SUB_LANG_ORDER):
-        for path in files:
-            if lang_of(path) == candidate:
-                return str(path)
-    return str(sorted(files)[0])
+    regional = None
+    for path in files:
+        if "." not in path.stem:
+            continue
+        tag = path.stem.rsplit(".", 1)[-1].lower().replace("_", "-")
+        if tag == wanted or tag == wanted + "-orig":
+            return str(path)
+        if regional is None and "-" not in wanted and tag.startswith(wanted + "-"):
+            regional = str(path)
+    return regional
 
 
 def fetch_subtitles(url: str, dest_dir: Path, browser: Optional[str] = None,
@@ -595,15 +735,16 @@ def fetch_subtitles(url: str, dest_dir: Path, browser: Optional[str] = None,
     import yt_dlp
 
     ensure_path()
-    langs = [language] if language else []
-    langs += [code for code in _SUB_LANG_ORDER if code not in langs]
+    wanted = (language or "").strip().lower()
+    if not wanted:
+        return None
     opts: Dict[str, Any] = {
         "skip_download": True,
         "writesubtitles": True,
         "writeautomaticsub": True,
-        "subtitleslangs": langs,
+        "subtitleslangs": [rf"{re.escape(wanted)}(?:[-_][A-Za-z0-9]+)*"],
+        "extractor_args": {"youtube": {"skip": ["translated_subs"]}},
         "subtitlesformat": "vtt",
-        "outtmpl": str(dest_dir / "subs.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
     }
@@ -611,16 +752,19 @@ def fetch_subtitles(url: str, dest_dir: Path, browser: Optional[str] = None,
     for client in (None, ["android_vr", "android"]):
         attempt = dict(opts)
         if client:
-            attempt["extractor_args"] = {"youtube": {"player_client": client}}
-        try:
-            with yt_dlp.YoutubeDL(attempt) as ydl:
-                ydl.download([url])
-        except Exception:  # noqa: BLE001
-            continue
-        files = list(dest_dir.glob("subs*.vtt"))
-        chosen = pick_subtitle_file(files, language)
-        if chosen:
-            return chosen
+            attempt["extractor_args"] = {"youtube": {"player_client": client, "skip": ["translated_subs"]}}
+        with tempfile.TemporaryDirectory(prefix=".subs-", dir=dest_dir) as scratch:
+            attempt["outtmpl"] = str(Path(scratch) / "subs.%(ext)s")
+            try:
+                with yt_dlp.YoutubeDL(attempt) as ydl:
+                    ydl.download([url])
+            except Exception:  # noqa: BLE001
+                continue
+            chosen = pick_subtitle_file(sorted(Path(scratch).glob("subs.*.vtt")), wanted)
+            if chosen:
+                target = dest_dir / Path(chosen).name
+                Path(chosen).replace(target)
+                return str(target)
     return None
 
 
@@ -701,12 +845,17 @@ def probe(url: str, browser: Optional[str] = None) -> Dict[str, Any]:
     video_heights = [int(f["height"]) for f in formats
                      if f.get("height") and (f.get("vcodec") or "none") != "none"]
     max_available = max(video_heights) if video_heights else 0
-    steps = [h for h in (1080, 720, 360) if h <= max_available] or ([max_available] if max_available else [])
+    youtube = is_youtube(url)
+    steps = (YOUTUBE_QUALITIES if youtube else
+             [h for h in (1080, 720, 360) if h <= max_available] or ([max_available] if max_available else []))
 
     options = []
     for height in steps:
-        vids = [f for f in formats if f.get("height") and int(f["height"]) <= height]
+        vids = [f for f in formats if (f.get("vcodec") or "none") != "none" and
+                (_resolution(f) == height if youtube else f.get("height") and int(f["height"]) <= height)]
         if not vids:
+            if youtube:
+                options.append({"height": height, "size_mb": None, "confirmed": False})
             continue
         def vscore(f: Dict[str, Any]) -> tuple:
             codec = (f.get("vcodec") or "")
@@ -725,7 +874,7 @@ def probe(url: str, browser: Optional[str] = None) -> Dict[str, Any]:
         size = estimate(video, audio)
         options.append({"height": height, "size": size,
                         "size_mb": round(size / 1024 / 1024) if size else 0,
-                        "format_id": video.get("format_id")})
+                        "format_id": video.get("format_id"), "confirmed": True})
 
     if not options:
         raise DownloadError("Не удалось получить форматы видео.")
@@ -734,7 +883,7 @@ def probe(url: str, browser: Optional[str] = None) -> Dict[str, Any]:
     # Раньше для длинных видео предлагался 360p «чтобы быстрее», и люди
     # случайно получали мыльные клипы. Экономия трафика — это «Экономно»,
     # а не снижение разрешения.
-    available = {int(o["height"]) for o in options if o.get("height")}
+    available = {int(o["height"]) for o in options if o.get("confirmed")} or {1080}
     up_to_hd = [h for h in available if h <= 1080]
     recommended = max(up_to_hd) if up_to_hd else max(available)
 
@@ -917,6 +1066,47 @@ def _cut_direct_section(url: str, dest_dir: Path, start: float, end: float,
         quality["height"] = int(info.get("height") or 0)
         quality["label"] = "direct"
     return out
+
+
+def inspect_url(url: str, browser: Optional[str] = None) -> Dict[str, Any]:
+    """Проверка источников: какой клиент YouTube отвечает и с каким качеством.
+
+    Нужна для диагностики «не скачивается»: сразу видно, дело в клиенте,
+    в cookies или в самом видео.
+    """
+    import yt_dlp
+
+    ensure_path()
+    results: List[Dict[str, Any]] = []
+    pot = _pot_enabled()
+    for label, args in _youtube_candidates(pot):
+        item: Dict[str, Any] = {"client": label, "ok": False, "height": 0, "error": ""}
+        opts: Dict[str, Any] = {"quiet": True, "no_warnings": True, "skip_download": True,
+                                "noplaylist": True, "socket_timeout": 20}
+        if args:
+            opts["extractor_args"] = {k: dict(v) for k, v in args.items()}
+        opts.update(_cookie_opts(browser))
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if info and "entries" in info:
+                entries = [e for e in info["entries"] if e]
+                info = entries[0] if entries else info
+            _fmt, height = _pick_format(info or {}, 1080)
+            item.update({"ok": bool(height), "height": height,
+                         "title": (info or {}).get("title")})
+        except Exception as exc:  # noqa: BLE001
+            item["error"] = _fmt_err(exc)
+        results.append(item)
+    bin_status: Dict[str, Any] = {}
+    try:
+        from . import ytdlp_bin
+
+        bin_status = ytdlp_bin.status()
+    except Exception:  # noqa: BLE001
+        bin_status = {}
+    return {"url": url, "pot": pot, "clients": results, "binary": bin_status,
+            "ytdlp": getattr(yt_dlp.version, "__version__", "")}
 
 
 def download_section(url: str, dest_dir: Path, start: float, end: float,

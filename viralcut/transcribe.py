@@ -306,6 +306,7 @@ def _probe_language(model, wav: Path, duration: float,
     if duration < 2.0 or not wav.exists():
         return None
     totals: Dict[str, float] = {}
+    votes = 0
     for index, (start, end) in enumerate(_probe_windows(duration)):
         span = max(0.0, min(end, duration) - start)
         if span < 2.0:
@@ -320,6 +321,7 @@ def _probe_language(model, wav: Path, duration: float,
             probability = float(getattr(info, "language_probability", 0.0) or 0.0)
             if lang:
                 totals[str(lang)] = totals.get(str(lang), 0.0) + probability
+                votes += 1
         except Exception:  # noqa: BLE001 — проба не должна ломать распознавание
             continue
         finally:
@@ -330,8 +332,7 @@ def _probe_language(model, wav: Path, duration: float,
     if not totals:
         return None
     best = max(totals.items(), key=lambda item: item[1])
-    # вероятность нормируем на число окон: два окна дают до 2.0
-    score = min(1.0, best[1] / max(1, len(totals) if len(totals) > 1 else 1))
+    score = best[1] / votes
     if score < _PROBE_MIN_PROBABILITY:
         return None
     return best[0], round(score, 3)
@@ -350,36 +351,27 @@ def _expected_script(language: str) -> str:
     return ""
 
 
+def subtitle_script_mismatch(segments: List[Dict[str, Any]], language: str) -> bool:
+    cyr, lat = _script_counts(" ".join(str(seg.get("text") or "") for seg in segments))
+    total = cyr + lat
+    expected = _expected_script(language)
+    return total >= 20 and (
+        (expected == "cyr" and cyr < 0.35 * total) or
+        (expected == "lat" and lat < 0.35 * total)
+    )
+
+
 def _fix_language_mismatch(model, wav: Path, workdir: Path, segments: List[Dict[str, Any]],
                            detected: Optional[str], on_progress: ProgressCb,
                            probe: Optional[str] = None
                            ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """Перераспознаёт один раз, если письменность не совпала с ожидаемым языком.
-
-    Ожидание берём из пробы языка (она надёжнее), иначе из определённого языка.
-    Если текст вышел на другом алфавите — значит модель «перевела» вместо
-    расшифровки, и субтитры окажутся не на языке ролика. Повторяем на языке
-    алфавита и принимаем результат, только если он стал заметно лучше.
-    """
-    authority = (probe or detected or "").strip()
-    if not authority or not segments:
-        return segments, detected
-    text = " ".join(str(seg.get("text") or "") for seg in segments)
-    cyr, lat = _script_counts(text)
-    total = cyr + lat
-    if total < 60:
-        return segments, detected
-    expected = _expected_script(authority)
-    target = ""
-    if expected == "cyr" and lat > 0.5 * total and cyr < 0.35 * total:
-        target = "ru"
-    elif expected == "lat" and cyr > 0.5 * total and lat < 0.35 * total:
-        target = "en"
-    if not target:
+    """При несовпадении письменности повторяет расшифровку на языке аудио."""
+    target = (probe or detected or "").strip()
+    if not subtitle_script_mismatch(segments, target):
         return segments, detected
     if on_progress:
         on_progress(0.997, f"Проверка языка · повторно на «{target}»")
-    print(f"[whisper] текст не на языке {authority!r} — перераспознаю на {target!r}",
+    print(f"[whisper] текст не на языке {target!r} — перераспознаю на {target!r}",
           file=sys.stderr, flush=True)
     duration = max(0.5, float(segments[-1].get("end") or 0.0))
     try:
@@ -394,7 +386,7 @@ def _fix_language_mismatch(model, wav: Path, workdir: Path, segments: List[Dict[
     new_total = new_cyr + new_lat
     if new_total < 20:
         return segments, detected
-    good = (new_cyr if target == "ru" else new_lat) / new_total
+    good = (new_cyr if _expected_script(target) == "cyr" else new_lat) / new_total
     if good < 0.6:
         return segments, detected
     print(f"[whisper] язык исправлен: {detected!r} → {target!r} "
@@ -602,9 +594,14 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
         except Exception:  # noqa: BLE001
             traceback.print_exc()
 
-    if language is None and len(spans) == 1:
+    expected_language = language or probe_language
+    if not expected_language and (language_probability or 0.0) >= _PROBE_MIN_PROBABILITY:
+        expected_language = detected_language
+    if expected_language and len(spans) == 1:
         out, detected_language = _fix_language_mismatch(
-            model, wav, workdir, out, detected_language, on_progress, probe_language)
+            model, wav, workdir, out, detected_language, on_progress, expected_language)
+    if expected_language and subtitle_script_mismatch(out, expected_language):
+        raise TranscriptionError("Текст субтитров не совпал с языком речи. Проверьте выбранную аудиодорожку.")
 
     out.sort(key=lambda s: s["start"])
     print(f"[whisper] итоговый язык: {detected_language or '?'} "

@@ -52,6 +52,13 @@ class ParseLocalTest(unittest.TestCase):
     def test_open_settings(self):
         self.assertIn("open_settings", self._types("открой настройки"))
 
+    def test_clip_number_used_for_edit_and_undo(self):
+        self.assertEqual(actions.parse_local("поправь первый клип, сделай субтитры жёлтыми"),
+                         [{"type": "rerender_clip", "clip_number": 1, "accent": "yellow"}])
+        self.assertEqual(actions.parse_local("отмени правку второго клипа"),
+                         [{"type": "undo_clip", "clip_number": 2}])
+        self.assertIsNone(actions.parse_undo("отмени загрузку"))
+
     def test_plain_question_has_no_actions(self):
         self.assertEqual(actions.parse_local("что такое субтитры?"), [])
 

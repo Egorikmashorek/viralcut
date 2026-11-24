@@ -77,6 +77,14 @@ class ProviderTest(unittest.TestCase):
         self.assertEqual(public["ai_key"], "")
         self.assertTrue(public["ai_key_set"])
 
+    def test_single_key_survives_switch_and_empty_save(self):
+        _conf()
+        settings.update({"ai_provider": "polza", "ai_key": ""})
+        self.assertEqual(ai.key(), "")
+        settings.update({"ai_provider": "deepseek"})
+        self.assertEqual(ai.key(), "sk-test-1234567890")
+        self.assertEqual(ai.key({"provider": "deepseek", "base": "https://example.invalid"}), "")
+
     def test_key_from_env(self):
         settings.update({"ai_key": ""})
         with mock.patch.dict(os.environ, {"VIRALCUT_AI_KEY": "sk-env-1"}):
@@ -89,8 +97,8 @@ class RequestTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp()) / "settings.json"
         self.patch = mock.patch.object(settings, "SETTINGS_FILE", self.tmp)
         self.patch.start()
-        _conf(provider="custom")
-        settings.update({"ai_base": "http://127.0.0.1:9", "ai_model": "test-model"})
+        settings.update({"ai_provider": "custom", "ai_key": "sk-test-1234567890",
+                         "ai_base": "http://127.0.0.1:9", "ai_model": "test-model"})
 
     def tearDown(self):
         self.patch.stop()
@@ -126,7 +134,7 @@ class RequestTest(unittest.TestCase):
         self.assertIn("Ключ не подошёл", str(ctx.exception))
 
     def test_no_key_message(self):
-        settings.update({"ai_key": ""})
+        settings.update({"ai_provider": "deepseek"})
         with self.assertRaises(ai.AIError) as ctx:
             ai.advice({"title": "Тест", "clips": []})
         self.assertIn("Не задан ключ", str(ctx.exception))

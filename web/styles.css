@@ -28,6 +28,9 @@
   --ease: cubic-bezier(0.22, 0.82, 0.24, 1);
 }
 
+@font-face { font-family: "VCGeologica"; src: url("/fonts/Geologica-Bold.ttf"); }
+@font-face { font-family: "VCPlexCond"; src: url("/fonts/IBMPlexSansCondensed-SemiBold.ttf"); }
+@font-face { font-family: "VCRubikMono"; src: url("/fonts/RubikMonoOne-Regular.ttf"); }
 @font-face { font-family: "VCMontserrat"; src: url("/fonts/Montserrat-ExtraBold.ttf"); }
 @font-face { font-family: "VCRusso"; src: url("/fonts/RussoOne-Regular.ttf"); }
 @font-face { font-family: "VCPTSans"; src: url("/fonts/PT_Sans-Narrow-Web-Bold.ttf"); }
@@ -2230,3 +2233,21 @@ input[type="range"]::-webkit-slider-thumb {
 
 .agent-toggle { margin-top: 8px; }
 .assistant-msg.note p { white-space: pre-wrap; }
+
+.ai-settings-intro { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ai-settings-art {
+  flex: none; position: relative; display: grid; place-items: center;
+  width: 126px; height: 65px; overflow: hidden; border-radius: 12px;
+  border: 1px solid #bb92ff45;
+  background: radial-gradient(ellipse at 68% 25%, #65334d, transparent 67%), #241837;
+}
+.ai-settings-art span {
+  z-index: 1; font-size: 35px; line-height: 1; color: #f0ceff;
+  text-shadow: 0 0 17px #d946ef;
+}
+.ai-settings-art i, .ai-settings-art b {
+  position: absolute; width: 84px; height: 29px; border: 1px solid #d0a4ff80;
+  border-radius: 50%; transform: rotate(-23deg);
+}
+.ai-settings-art b { transform: rotate(23deg); border-color: #ff6bb577; }
+#setAiKey:disabled { opacity: .55; }

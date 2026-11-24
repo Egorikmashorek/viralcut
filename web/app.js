@@ -78,7 +78,10 @@ const BUNDLED_FONT_OPTIONS = [
   { key: "marckscript", label: "Marck Script", group: "Акцентные" },
   { key: "ruslan", label: "Ruslan Display", group: "Акцентные" },
   { key: "stalinist", label: "Stalinist One", group: "Акцентные" },
-  { key: "underdog", label: "Underdog", group: "Акцентные" }
+  { key: "underdog", label: "Underdog", group: "Акцентные" },
+  { key: "geologica", label: "Geologica Bold", group: "База" },
+  { key: "ibmplexcond", label: "IBM Plex Sans Condensed SemiBold", group: "Узкие" },
+  { key: "rubikmono", label: "Rubik Mono One", group: "Акцентные" }
 ];
 
 const BUNDLED_GROUPS = Object.fromEntries(BUNDLED_FONT_OPTIONS.map((f) => [f.key, f.group]));
@@ -94,6 +97,9 @@ function fontOptionsHTML(selected) {
 }
 
 const BUNDLED_FONT_CSS = {
+  geologica: "VCGeologica",
+  ibmplexcond: "VCPlexCond",
+  rubikmono: "VCRubikMono",
   montserrat: "VCMontserrat",
   russo: "VCRusso",
   ptsans: "VCPTSans",
@@ -661,16 +667,32 @@ function askQuality(url) {
     method: "POST",
     body: JSON.stringify({ url, cookies_browser: state.opts.cookies })
   }).then((data) => {
-    if (!state.probeOpen) return;
+    if (!state.probeOpen || state.probeUrl !== url) return;
     state.probeData = data;
     renderQuality(data);
   }).catch((err) => {
+    if (!state.probeOpen || state.probeUrl !== url) return;
     const body = $("#qualityBody");
     if (!body) return;
+    if (isYouTubeSource(url)) {
+      renderQuality({ title: url, probeError: err.message, recommended: 1080,
+        options: [1080, 720, 480].map(height => ({ height, confirmed: false })) });
+      return;
+    }
     body.innerHTML = `<div class="tmpl-error">${esc(err.message)}</div>
       <button class="btn-ghost" id="qualitySkip">Продолжить без рекомендации (1080p)</button>`;
     $("#qualitySkip").addEventListener("click", () => createFromProbe(1080));
   });
+}
+
+function isYouTubeSource(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return ["youtube.com", "youtu.be", "youtube-nocookie.com"].some(domain =>
+      host === domain || host.endsWith("." + domain));
+  } catch (_) {
+    return false;
+  }
 }
 
 function renderQuality(data) {
@@ -679,13 +701,14 @@ function renderQuality(data) {
   const rec = data.recommended;
   const cards = data.options.map((o) => `
     <button class="quality-card ${o.height === rec ? "recommended" : ""}" data-quality="${o.height}">
-      <span class="q-height">${o.height}p</span>
-      <span class="q-size">${formatSize(o.size_mb)}</span>
+      <span class="q-height">${isYouTubeSource(state.probeUrl) && o.height === 1080 ? "Full HD 1080p" : o.height + "p"}</span>
+      <span class="q-size">${o.confirmed === false ? "Проверить при загрузке" : formatSize(o.size_mb)}</span>
       ${o.height === rec ? '<span class="q-badge">рекомендуем</span>' : ""}
     </button>`).join("");
   body.innerHTML = `
     <div class="quality-title">${esc(data.title)}</div>
-    <div class="quality-meta">${fmtDur(data.duration)} · ${esc(data.uploader || "")}</div>
+    ${data.probeError ? `<div class="tmpl-error">${esc(data.probeError)}</div>` :
+      `<div class="quality-meta">${fmtDur(data.duration)} · ${esc(data.uploader || "")}</div>`}
     <div class="quality-cards">${cards}</div>
 
     <div class="quality-note" id="qualityNote"></div>
@@ -699,6 +722,10 @@ function renderQuality(data) {
   const updateNote = () => {
     const opt = data.options.find((o) => o.height === chosen);
     if (!opt) return;
+    if (opt.confirmed === false) {
+      note.textContent = `Попробуем скачать ${chosen}p. Качество проверим до нарезки.`;
+      return;
+    }
     const eco = $("#qualityEco")?.checked;
     state.segmentsChoice = false;
     if (eco) {
@@ -728,7 +755,7 @@ async function createFromProbe(height) {
   const btn = $("#qualityStart") || $("#qualitySkip");
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Запуск'; }
   try {
-    const options = { ...heroOptions(), max_height: height, segments: state.segmentsChoice };
+    const options = { ...heroOptions(), max_height: height, exact_quality: isYouTubeSource(url), segments: state.segmentsChoice };
     const project = await api("/api/projects", {
       method: "POST",
       body: JSON.stringify({ url, options, prepare_only: true })
@@ -2382,12 +2409,17 @@ async function loadAiModels(selected, force) {
   const select = $("#setAiModel");
   if (!select) return;
   const provider = (window.__aiProvider || "deepseek");
+  const requestId = String(Number(select.dataset.catalogRequest || 0) + 1);
+  select.dataset.catalogRequest = requestId;
+  const isCurrent = () => select.isConnected && select.dataset.catalogRequest === requestId
+    && window.__aiProvider === provider;
   const fallback = AI_FALLBACK_MODELS[provider] || [];
   const hint = $("#setAiModelHint");
   if (hint) hint.textContent = "Загружаю список моделей…";
   try {
     const query = `?provider=${encodeURIComponent(provider)}${force ? "&force=true" : ""}`;
     const data = await api(`/api/ai/models${query}`);
+    if (!isCurrent()) return;
     const models = (data.models || []).slice(0, 500);
     if (!models.length) throw new Error("пусто");
     select.innerHTML = models.map((m) =>
@@ -2402,6 +2434,8 @@ async function loadAiModels(selected, force) {
       hint.textContent = (data.warning ? `${data.warning} ` : "") + total + desc;
     }
   } catch (err) {
+    if (!isCurrent()) return;
+    if (hint) hint.textContent = "Каталог недоступен. Показаны известные модели.";
     select.innerHTML = (fallback.length ? fallback : [selected].filter(Boolean))
       .map((id) => `<option value="${esc(id)}" ${id === selected ? "selected" : ""}>${esc(id)}</option>`).join("");
     if (!fallback.length) {
@@ -2620,7 +2654,11 @@ async function askAssistant(raw) {
 
 async function applyAssistantUI(data) {
   const ui = (data && data.ui) || {};
-  const actions = (data && data.actions) || [];
+  const actions = [...(data.actions || []), ...(data.steps || []).flatMap(step => step.actions || [])];
+  if (state.current && actions.some(a => a.ok && ["rerender_clip", "undo_clip"].includes(a.type))) {
+    await loadDetail(true);
+    schedulePoll(500);
+  }
   // что-то изменилось на сервере — обновляем виджеты и список проектов
   if (actions.some((a) => a.type === "set_settings")) {
     try { pollSystem(); } catch (e) {}
@@ -2716,11 +2754,17 @@ async function openSettings() {
           <div class="set-hint" id="setCpuLimitHint">${cpuLimitHint(conf.cpu_limit ?? 100, conf.cpu_cap)}</div>
         </div>
         <div class="form-card set-section ai-section">
-          <h4>ИИ-помощник</h4>
+          <div class="ai-settings-intro">
+            <div><h4>ИИ-помощник</h4><p class="set-hint">Выберите провайдера и сохраните один API-ключ.</p></div>
+            <div class="ai-settings-art" aria-hidden="true"><span>✦</span><i></i><b></b></div>
+          </div>
           <div class="set-seg" id="setAiProvider">
             ${aiProviderButtons(conf.ai_provider || "deepseek", conf.ai && conf.ai.providers)}
           </div>
           <div class="set-hint" id="setAiProviderHint">${aiProviderHint(conf)}</div>
+          <label class="set-label" for="setAiBase">Адрес API (для своей модели)</label>
+          <input type="text" id="setAiBase" class="set-input" spellcheck="false"
+                 placeholder="http://127.0.0.1:11434/v1" value="${esc(conf.ai && conf.ai.base ? conf.ai.base : "")}" />
           <label class="set-label" for="setAiModel">Модель</label>
           <div class="set-row">
             <select id="setAiModel" class="set-select">
@@ -2729,19 +2773,15 @@ async function openSettings() {
             <button class="btn-ghost" type="button" id="setAiRefresh" title="Обновить список моделей">Обновить</button>
           </div>
           <div class="set-hint" id="setAiModelHint"></div>
-          <label class="set-label" for="setAiKey">API-ключ</label>
+          <label class="set-label" for="setAiKey" id="setAiKeyLabel">API-ключ</label>
           <input type="password" id="setAiKey" class="set-input" autocomplete="off" spellcheck="false"
                  placeholder="${conf.ai_key_set ? "ключ сохранён — оставьте пустым, чтобы не менять" : "вставьте ключ"}" />
-          <div class="set-hint">
-            ${conf.ai_key_set ? `Ключ сохранён${conf.ai && conf.ai.key_hint ? ` (${esc(conf.ai.key_hint)})` : ""}. ` : ""}
-            ${conf.ai && conf.ai.key_url ? `<a href="${esc(conf.ai.key_url)}" target="_blank" rel="noopener">Получить ключ</a>. ` : ""}
-            Запрос уходит на сервер провайдера только по кнопке «Совет ИИ».
-          </div>
+          <div class="set-hint" id="setAiKeyStatus" aria-live="polite"></div>
           <div class="set-row">
             <button class="btn-ghost" type="button" id="setLocalDetect">Найти локальный сервер</button>
             <span class="set-hint" id="setLocalInfo"></span>
           </div>
-          <label class="toggle agent-toggle"><input type="checkbox" id="setAgentMode" ${conf.agent_mode ? "checked" : ""}/><span class="track"></span><span><b>Агент-режим</b> — выполняет задание по шагам, пока не доведёт до результата</span></label>
+          <label class="toggle agent-toggle"><input type="checkbox" id="setAgentMode" ${conf.agent_mode ? "checked" : ""}/><span class="track"></span><span><b>Агент-режим (бета)</b> — выполняет задание по шагам; включите, если хотите, чтобы агент сам доводил дело до конца</span></label>
         </div>
         <div class="form-card set-section paths-section">
           <h4>Папки сохранения</h4>
@@ -2756,6 +2796,15 @@ async function openSettings() {
             <button class="btn-ghost" type="button" id="setClipsPick">Выбрать…</button>
           </div>
           <label class="toggle"><input type="checkbox" id="setAskFolder" ${conf.ask_folder ? "checked" : ""}/><span class="track"></span><span>Спрашивать папку при каждом сохранении</span></label>
+        </div>
+        <div class="form-card set-section">
+          <h4>Проверка загрузки</h4>
+          <div class="set-hint">Если видео не скачивается — проверьте ссылку: покажем, какие клиенты источника отвечают и какое качество отдают.</div>
+          <div class="set-row">
+            <input type="text" id="setCheckUrl" class="set-input" placeholder="https://youtube.com/watch?v=…" spellcheck="false" />
+            <button class="btn-ghost" type="button" id="setCheckRun">Проверить</button>
+          </div>
+          <pre id="setCheckOut" class="diag-out hidden"></pre>
         </div>
         <div class="form-card set-section">
           <h4>Журнал приложения</h4>
@@ -2804,9 +2853,27 @@ async function openSettings() {
   window.__aiProviders = (conf.ai && conf.ai.providers) || null;
   window.__aiProvider = conf.ai_provider || "deepseek";
   let aiProvider = conf.ai_provider || "deepseek";
+  const syncAiKey = () => {
+    const provider = conf.ai?.providers?.find(p => p.key === aiProvider);
+    const input = $("#setAiKey");
+    const local = aiProvider === "local";
+    const saved = aiProvider === conf.ai_provider && conf.ai_key_set &&
+      $("#setAiBase").value.trim().replace(/\/+$/, "") === (conf.ai?.base || "");
+    $("#setAiKeyLabel").textContent = provider ? `API-ключ · ${provider.label}` : "API-ключ";
+    input.disabled = local;
+    input.placeholder = saved ? "Введите новый ключ для замены" : "Вставьте API-ключ";
+    $("#setAiKeyStatus").textContent = local ? "Для локальной модели ключ не нужен."
+      : saved ? "Ключ сохранён на этом компьютере."
+      : "При сохранении новый ключ заменит предыдущий.";
+  };
+  $("#setAiBase").addEventListener("input", syncAiKey);
+  syncAiKey();
   $$("#setAiProvider button").forEach((b) => b.addEventListener("click", () => {
     if (aiProvider === b.dataset.val) return;
+    $("#setAiKey").value = "";
     aiProvider = b.dataset.val;
+    $("#setAiBase").value = aiProvider === conf.ai_provider ? (conf.ai?.base || "") : "";
+    syncAiKey();
     window.__aiProvider = aiProvider;
     $$("#setAiProvider button").forEach((x) => x.classList.toggle("active", x === b));
     const hint = $("#setAiProviderHint");
@@ -2841,6 +2908,10 @@ async function openSettings() {
         info.textContent = `Найдено: ${found.models.slice(0, 4).join(", ")}`;
         aiProvider = "local";
         window.__aiProvider = "local";
+        const baseInput = $("#setAiBase");
+        if (baseInput) baseInput.value = found.base;
+        $("#setAiKey").value = "";
+        syncAiKey();
         $$("#setAiProvider button").forEach((x) => x.classList.toggle("active", x.dataset.val === "local"));
         const select = $("#setAiModel");
         if (select) {
@@ -2873,6 +2944,23 @@ async function openSettings() {
     };
     powerInput.addEventListener("input", syncPower);
   }
+  $("#setCheckRun")?.addEventListener("click", async () => {
+    const out = $("#setCheckOut");
+    const url = ($("#setCheckUrl")?.value || "").trim();
+    if (!url) { toast("Вставьте ссылку", "err"); return; }
+    if (out) { out.classList.remove("hidden"); out.textContent = "Проверяю источники…"; }
+    try {
+      const data = await api(`/api/download/check?url=${encodeURIComponent(url)}`);
+      const lines = [`yt-dlp: ${data.ytdlp} · POT: ${data.pot ? "есть" : "нет"} · запасной движок: ${data.binary && data.binary.present ? (data.binary.version || "есть") : "нет"}`];
+      (data.clients || []).forEach((item) => {
+        lines.push(`${item.ok ? "✓" : "✗"} ${item.client}: ` + (item.ok ? `${item.height}p` : item.error || "нет ответа"));
+      });
+      if (out) out.textContent = lines.join("\n");
+    } catch (e) {
+      if (out) out.textContent = "Ошибка: " + String(e.message || e);
+    }
+  });
+
   $("#setDownloadPick").addEventListener("click", () => chooseFolder("download"));
   $("#setClipsPick").addEventListener("click", () => chooseFolder("clips"));
   let encoder = conf.encoder || "auto";
@@ -2894,11 +2982,12 @@ async function openSettings() {
         gpu_preference: gpuPreference,
         ai_provider: aiProvider,
         ai_model: $("#setAiModel") ? $("#setAiModel").value : "",
+        ai_base: $("#setAiBase") ? $("#setAiBase").value.trim() : "",
         agent_mode: agentMode,
       };
       // пустое поле = «не менять ключ», иначе сохранение стирало бы его
       const aiKey = ($("#setAiKey")?.value || "").trim();
-      if (aiKey) payload.ai_key = aiKey;
+      if (aiKey && aiProvider !== "local") payload.ai_key = aiKey;
       const saved = await api("/api/settings", { method: "POST", body: JSON.stringify(payload) });
       closeModal();
       if (saved.encoder_warning) toast(saved.encoder_warning, "err");

@@ -114,7 +114,10 @@ ALLOWED_UPLOAD_SUFFIXES = {
     ".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".ts", ".mts", ".m2ts",
     ".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac",
 }
-MAX_UPLOAD_BYTES = int(float(os.environ.get("VIRALCUT_MAX_UPLOAD_GB", "4")) * 1024 ** 3)
+# Локальная нарезка не должна упираться в 4 ГБ: длинные записи бывают по 20–50 ГБ.
+# Предел настраивается, по умолчанию 64 ГБ; места на диске всё равно нужно вдвое
+# больше (исходник + дорожки).
+MAX_UPLOAD_BYTES = int(float(os.environ.get("VIRALCUT_MAX_UPLOAD_GB", "64")) * 1024 ** 3)
 MAX_FONT_BYTES = 24 * 1024 * 1024
 
 
@@ -411,11 +414,13 @@ def _assistant_context(project_id: Optional[str] = None) -> Dict[str, Any]:
     if project_id:
         project = db.get_project(project_id)
         if project:
+            clips = db.list_clips(project_id)
             context["project"] = {
                 "id": project.get("id"),
                 "status": project.get("status"),
                 "language": project.get("language"),
-                "clips": len(db.list_clips(project_id)),
+                "clips": len(clips),
+                "clip_index": assistant.clip_index(clips),
             }
     return context
 
@@ -446,6 +451,32 @@ def agent_run(body: AssistantIn) -> Dict[str, Any]:
     """Явный запуск агента: несколько шагов до результата."""
     context = _assistant_context(body.project_id)
     return agent.run(body.message, context, body.history)
+
+
+@app.get("/api/download/check")
+def download_check(url: str, browser: Optional[str] = None) -> Dict[str, Any]:
+    """Диагностика загрузки: какие клиенты отвечают и с каким качеством."""
+    from . import downloader as downloader_module
+
+    if not url.strip():
+        raise HTTPException(400, "Нужна ссылка")
+    try:
+        return downloader_module.inspect_url(url.strip(), browser or None)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, str(exc)[:300]) from exc
+
+
+@app.get("/api/download/engines")
+def download_engines() -> Dict[str, Any]:
+    """Какие движки загрузки доступны: встроенный и запасной бинарник."""
+    from . import ytdlp_bin
+    from . import downloader as downloader_module
+    import yt_dlp
+
+    return {"ytdlp": getattr(yt_dlp.version, "__version__", ""),
+            "binary": ytdlp_bin.status(),
+            "pot": bool(os.environ.get("VIRALCUT_POT_URL")),
+            "ffmpeg_ready": downloader_module.ytdlp_ffmpeg_ready()}
 
 
 @app.get("/api/ai/local")
